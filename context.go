@@ -437,3 +437,16 @@ func (c *Context) GetReqHeader(key string) string {
 func (c *Context) GetAllReqHeader() http.Header {
 	return c.Request.Header
 }
+
+// 使用定义的errorHandle来处理error并结束当前handle
+func (c *Context) ErrorUseHandle(code int) {
+	if c.engine != nil && c.engine.errorHandle.handler != nil {
+		c.engine.errorHandle.handler(c, code)
+		c.Abort()
+		return
+	} else {
+		// Default error handling if no custom handler is set
+		c.String(code, http.StatusText(code))
+		c.Abort()
+	}
+}
