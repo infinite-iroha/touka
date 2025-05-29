@@ -677,3 +677,133 @@ func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) IR
 		engine:   group.engine, // 指向 Engine 实例
 	}
 }
+
+// == 其他操作方式 ===
+
+// Static FileServer 传入一个文件夹路径, 使用FileServer进行处理
+func (engine *Engine) Static(relativePath, rootPath string) {
+	// 清理路径
+	relativePath = path.Clean(relativePath)
+	rootPath = path.Clean(rootPath)
+
+	// 确保相对路径以 '/' 结尾，以便 FileServer 正确处理子路径
+	if !strings.HasSuffix(relativePath, "/") {
+		relativePath += "/"
+	}
+
+	// 创建一个文件系统处理器
+	fileServer := http.FileServer(http.Dir(rootPath))
+
+	// 注册一个捕获所有路径的路由，使用自定义处理器
+	// 注意：这里使用 ANY 方法，但 FileServer 通常只处理 GET 和 HEAD
+	// 我们可以通过在处理函数内部检查方法来限制
+	engine.ANY(relativePath+"*filepath", func(c *Context) {
+		// 检查是否是 GET 或 HEAD 方法
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			// 如果不是，且启用了 MethodNotAllowed 处理，则继续到 MethodNotAllowed 中间件
+			if engine.HandleMethodNotAllowed {
+				c.Next()
+			} else {
+				// 否则，返回 405 Method Not Allowed
+				engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		requestPath := c.Request.URL.Path
+
+		// 获取捕获到的文件路径参数
+		filepath := c.Param("filepath")
+
+		// 构造文件服务器需要处理的请求路径
+		// FileServer 会将请求路径与 http.Dir 的根路径结合
+		// 我们需要移除相对路径前缀，只保留文件路径部分
+		// 例如，如果 relativePath 是 "/static/"，请求是 "/static/js/app.js"
+		// FileServer 需要的路径是 "/js/app.js"
+		// 这里的 filepath 参数已经包含了 "/" 前缀，例如 "/js/app.js"
+		// 所以直接使用 filepath 即可
+		c.Request.URL.Path = filepath
+
+		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
+		// 这样我们可以在 FileServer 返回 404 或 403 时，使用 Engine 的 ErrorHandler 进行统一处理
+		ecw := AcquireErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
+		defer ReleaseErrorCapturingResponseWriter(ecw)
+
+		//
+		// 调用 FileServer 处理请求
+		fileServer.ServeHTTP(ecw, c.Request)
+
+		// 在 FileServer 处理完成后，检查是否捕获到错误状态码，并调用 ErrorHandler
+		ecw.processAfterFileServer()
+
+		// 恢复原始请求路径，以便后续中间件或日志记录使用
+		c.Request.URL.Path = requestPath
+
+		// 中止处理链，因为 FileServer 已经处理了响应
+		c.Abort()
+	})
+}
+
+// Group的Static
+func (group *RouterGroup) Static(relativePath, rootPath string) {
+	// 清理路径
+	relativePath = path.Clean(relativePath)
+	rootPath = path.Clean(rootPath)
+
+	// 确保相对路径以 '/' 结尾，以便 FileServer 正确处理子路径
+	if !strings.HasSuffix(relativePath, "/") {
+		relativePath += "/"
+	}
+
+	// 创建一个文件系统处理器
+	fileServer := http.FileServer(http.Dir(rootPath))
+
+	// 注册一个捕获所有路径的路由，使用自定义处理器
+	// 注意：这里使用 ANY 方法，但 FileServer 通常只处理 GET 和 HEAD
+	// 我们可以通过在处理函数内部检查方法来限制
+	group.ANY(relativePath+"*filepath", func(c *Context) {
+		// 检查是否是 GET 或 HEAD 方法
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			// 如果不是，且启用了 MethodNotAllowed 处理，则继续到 MethodNotAllowed 中间件
+			if group.engine.HandleMethodNotAllowed {
+				c.Next()
+			} else {
+				// 否则，返回 405 Method Not Allowed
+				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		requestPath := c.Request.URL.Path
+
+		// 获取捕获到的文件路径参数
+		filepath := c.Param("filepath")
+
+		// 构造文件服务器需要处理的请求路径
+		// FileServer 会将请求路径与 http.Dir 的根路径结合
+		// 我们需要移除相对路径前缀，只保留文件路径部分
+		// 例如，如果 relativePath 是 "/static/"，请求是 "/static/js/app.js"
+		// FileServer 需要的路径是 "/js/app.js"
+		// 这里的 filepath 参数已经包含了 "/" 前缀，例如 "/js/app.js"
+		// 所以直接使用 filepath 即可
+		c.Request.URL.Path = filepath
+
+		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
+		// 这样我们可以在 FileServer 返回 404 或 403 时，使用 Engine 的 ErrorHandler 进行统一处理
+		ecw := AcquireErrorCapturingResponseWriter(c, group.engine.errorHandle.handler)
+		defer ReleaseErrorCapturingResponseWriter(ecw)
+
+		//
+		// 调用 FileServer 处理请求
+		fileServer.ServeHTTP(ecw, c.Request)
+
+		// 在 FileServer 处理完成后，检查是否捕获到错误状态码，并调用 ErrorHandler
+		ecw.processAfterFileServer()
+
+		// 恢复原始请求路径，以便后续中间件或日志记录使用
+		c.Request.URL.Path = requestPath
+
+		// 中止处理链，因为 FileServer 已经处理了响应
+		c.Abort()
+	})
+}
