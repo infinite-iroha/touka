@@ -1,4 +1,4 @@
-module github.com/WJQSERVER/touka
+module github.com/infinite-iroha/touka
 
 go 1.24.3
 
