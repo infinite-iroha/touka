@@ -2,6 +2,7 @@ package touka
 
 import (
 	"context"
+	"log"
 	"reflect"
 	"runtime"
 	"strings"
@@ -52,7 +53,8 @@ type Engine struct {
 
 	noRoute HandlerFunc
 
-	unMatchFS UnMatchFS // 未匹配下的处理
+	unMatchFS         UnMatchFS    // 未匹配下的处理
+	unMatchFileServer http.Handler // 处理handle
 
 	serverProtocols     *http.Protocols //服务协议
 	Protocols           ProtocolsConfig //协议版本配置
@@ -73,6 +75,9 @@ func defaultErrorHandle(c *Context, code int) { // 检查客户端是否已断�
 
 		return
 	default:
+		if c.Writer.Written() {
+			return
+		}
 		// 输出json 状态码与状态码对应描述
 		c.JSON(code, H{
 			"code":    code,
@@ -81,6 +86,22 @@ func defaultErrorHandle(c *Context, code int) { // 检查客户端是否已断�
 		c.Writer.Flush()
 		c.Abort()
 		return
+	}
+}
+
+// 默认errorhandle包装 避免竞争意外问题, 保证稳定性
+func defaultErrorWarp(handler ErrorHandler) ErrorHandler {
+	return func(c *Context, code int) {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		default:
+			if c.Writer.Written() {
+				log.Printf("errpage: response already started for status %d, skipping error page rendering", code)
+				return
+			}
+		}
+		handler(c, code)
 	}
 }
 
@@ -146,7 +167,7 @@ func Default() *Engine {
 // 设置自定义错误处理
 func (engine *Engine) SetErrorHandler(handler ErrorHandler) {
 	engine.errorHandle.useDefault = false
-	engine.errorHandle.handler = handler
+	engine.errorHandle.handler = defaultErrorWarp(handler)
 }
 
 // 获取一个默认错误处理handle
@@ -159,8 +180,10 @@ func (engine *Engine) SetUnMatchFS(fs http.FileSystem) {
 	if fs != nil {
 		engine.unMatchFS.FSForUnmatched = fs
 		engine.unMatchFS.ServeUnmatchedAsFS = true
+		engine.unMatchFileServer = http.FileServer(fs)
 	} else {
 		engine.unMatchFS.ServeUnmatchedAsFS = false
+		engine.unMatchFileServer = nil
 	}
 }
 
@@ -442,14 +465,20 @@ func (engine *Engine) handleRequest(c *Context) {
 func unMatchFSHandle() HandlerFunc {
 	return func(c *Context) {
 		engine := c.engine
+		// 确保 engine.unMatchFileServer 存在
+		if !engine.unMatchFS.ServeUnmatchedAsFS || engine.unMatchFileServer == nil {
+			c.Next() // 如果未配置或 FileSystem 为 nil，则继续处理链
+			return
+		}
 		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
 			// 使用 http.FileServer 处理未匹配的请求
-			fileServer := http.FileServer(engine.unMatchFS.FSForUnmatched)
+			//fileServer := http.FileServer(engine.unMatchFS.FSForUnmatched)
 			//ecw := newErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
-			ecw := AcquireErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
+			ecw := AcquireErrorCapturingResponseWriter(c)
 			defer ReleaseErrorCapturingResponseWriter(ecw)
-			fileServer.ServeHTTP(ecw, c.Request)
+			c.engine.unMatchFileServer.ServeHTTP(ecw, c.Request)
 			ecw.processAfterFileServer()
+			c.Abort()
 			return
 		} else {
 			if engine.noRoute == nil {
@@ -726,7 +755,7 @@ func (engine *Engine) Static(relativePath, rootPath string) {
 
 		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
 		// 这样我们可以在 FileServer 返回 404 或 403 时，使用 Engine 的 ErrorHandler 进行统一处理
-		ecw := AcquireErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
+		ecw := AcquireErrorCapturingResponseWriter(c)
 		defer ReleaseErrorCapturingResponseWriter(ecw)
 
 		//
@@ -790,7 +819,7 @@ func (group *RouterGroup) Static(relativePath, rootPath string) {
 
 		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
 		// 这样我们可以在 FileServer 返回 404 或 403 时，使用 Engine 的 ErrorHandler 进行统一处理
-		ecw := AcquireErrorCapturingResponseWriter(c, group.engine.errorHandle.handler)
+		ecw := AcquireErrorCapturingResponseWriter(c)
 		defer ReleaseErrorCapturingResponseWriter(ecw)
 
 		//
