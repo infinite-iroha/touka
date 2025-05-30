@@ -176,6 +176,13 @@ func (c *Context) Param(key string) string {
 	return c.Params.ByName(key)
 }
 
+// Raw 向响应写入bytes
+func (c *Context) Raw(code int, contentType string, data []byte) {
+	c.Writer.Header().Set("Content-Type", contentType)
+	c.Writer.WriteHeader(code)
+	c.Writer.Write(data)
+}
+
 // String 向响应写入格式化的字符串。
 func (c *Context) String(code int, format string, values ...interface{}) {
 	c.Writer.WriteHeader(code)
@@ -341,6 +348,22 @@ func (c *Context) WriteStream(reader io.Reader) (written int64, err error) {
 // 注意：请求体只能读取一次。
 func (c *Context) GetReqBody() io.ReadCloser {
 	return c.Request.Body
+}
+
+// GetReqBodyFull
+// GetReqBodyFull 读取并返回请求体的所有内容。
+// 注意：请求体只能读取一次。
+func (c *Context) GetReqBodyFull() ([]byte, error) {
+	if c.Request.Body == nil {
+		return nil, nil
+	}
+	defer c.Request.Body.Close() // 确保请求体被关闭
+	data, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to read request body: %w", err))
+		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+	return data, nil
 }
 
 // RequestIP 返回客户端的 IP 地址。
