@@ -473,3 +473,8 @@ func (c *Context) ErrorUseHandle(code int) {
 		c.Abort()
 	}
 }
+
+// GetProtocol 获取当前连接版本
+func (c *Context) GetProtocol() string {
+	return c.Request.Proto
+}
