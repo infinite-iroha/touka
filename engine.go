@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/WJQSERVER-STUDIO/httpc"
+	"github.com/fenthope/reco"
 )
 
 // Last 返回链中的最后一个处理函数。
@@ -44,6 +45,8 @@ type Engine struct {
 	// TrustedProxies        []string // 可信代理 IP 列表，用于判断是否使用 X-Forwarded-For 等头部 (预留接口)
 
 	HTTPClient *httpc.Client // 用于在此上下文中执行出站 HTTP 请求。
+
+	LogReco *reco.Logger
 
 	HTMLRender interface{} // 用于 HTML 模板渲染，可以设置为 *template.Template 或自定义渲染器接口
 
@@ -139,6 +142,7 @@ func New() *Engine {
 	}
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
+	engine.SetLogger(defaultLogRecoConfig)
 	// 初始化 Context Pool，为每个新 Context 实例提供一个构造函数
 	engine.pool.New = func() interface{} {
 		return &Context{
@@ -163,6 +167,11 @@ func Default() *Engine {
 }
 
 // === 外部操作方法 ===
+
+// 配置日志Logger
+func (engine *Engine) SetLogger(logcfg reco.Config) {
+	engine.LogReco = NewLogger(logcfg)
+}
 
 // 设置自定义错误处理
 func (engine *Engine) SetErrorHandler(handler ErrorHandler) {

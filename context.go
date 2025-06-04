@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fenthope/reco"
 	"github.com/go-json-experiment/json"
 
 	"github.com/WJQSERVER-STUDIO/go-utils/copyb"
@@ -481,4 +482,9 @@ func (c *Context) GetProtocol() string {
 // GetHTTPC 获取框架自带传递的httpc
 func (c *Context) GetHTTPC() *httpc.Client {
 	return c.HTTPClient
+}
+
+// GetLogger 获取engine的Logger
+func (c *Context) GetLogger() *reco.Logger {
+	return c.engine.LogReco
 }

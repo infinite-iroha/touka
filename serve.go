@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/fenthope/reco"
 )
 
 const defaultShutdownTimeout = 5 * time.Second // 定义默认的优雅关闭超时时间
@@ -55,11 +57,16 @@ func getShutdownTimeout(timeouts []time.Duration) time.Duration {
 
 // handleGracefulShutdown 处理一个或多个 http.Server 实例的优雅关闭。
 // 它监听操作系统信号，并在指定超时时间内尝试关闭所有服务器。
-func handleGracefulShutdown(servers []*http.Server, timeout time.Duration) error {
+func handleGracefulShutdown(servers []*http.Server, timeout time.Duration, logger *reco.Logger) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down Touka server(s)...")
+
+	go func() {
+		log.Println("Touka Logger Clossing...")
+		CloseLogger(logger)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -116,7 +123,7 @@ func (engine *Engine) RunShutdown(addr string, timeouts ...time.Duration) error 
 		}
 	}()
 
-	return handleGracefulShutdown([]*http.Server{srv}, timeout)
+	return handleGracefulShutdown([]*http.Server{srv}, timeout, engine.LogReco)
 }
 
 // RunWithTLS 启动 HTTPS 服务器并支持优雅关闭。
@@ -152,7 +159,7 @@ func (engine *Engine) RunWithTLS(addr string, tlsConfig *tls.Config, timeouts ..
 		}
 	}()
 
-	return handleGracefulShutdown([]*http.Server{srv}, timeout)
+	return handleGracefulShutdown([]*http.Server{srv}, timeout, engine.LogReco)
 }
 
 // RunWithTLSRedir 启动 HTTP 和 HTTPS 服务器，并将所有 HTTP 请求重定向到 HTTPS。
@@ -227,5 +234,5 @@ func (engine *Engine) RunWithTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls
 		}
 	}()
 
-	return handleGracefulShutdown([]*http.Server{httpsSrv, httpSrv}, timeout)
+	return handleGracefulShutdown([]*http.Server{httpsSrv, httpSrv}, timeout, engine.LogReco)
 }
