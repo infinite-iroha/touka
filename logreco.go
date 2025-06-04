@@ -3,6 +3,7 @@ package touka
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/fenthope/reco"
 )
@@ -11,6 +12,7 @@ import (
 var defaultLogRecoConfig = reco.Config{
 	Level:         reco.LevelInfo,
 	Mode:          reco.ModeText,
+	TimeFormat:    time.RFC3339,
 	Output:        os.Stdout,
 	Async:         true,
 	DefaultFields: nil,
