@@ -845,3 +845,115 @@ func (group *RouterGroup) Static(relativePath, rootPath string) {
 		c.Abort()
 	})
 }
+
+// Static File 传入一个文件路径, 使用FileServer进行处理
+func (engine *Engine) StaticFile(relativePath, filePath string) {
+	// 清理路径
+	relativePath = path.Clean(relativePath)
+	filePath = path.Clean(filePath)
+
+	// 创建一个文件系统处理器，指向包含目标文件的目录
+	// http.Dir 需要一个目录路径
+	dir := path.Dir(filePath)
+	fileName := path.Base(filePath)
+	fileServer := http.FileServer(http.Dir(dir))
+
+	FileHandle := func(c *Context) {
+		// 检查是否是 GET 或 HEAD 方法
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			// 如果不是，且启用了 MethodNotAllowed 处理，则继续到 MethodNotAllowed 中间件
+			if engine.HandleMethodNotAllowed {
+				c.Next()
+			} else {
+				// 否则，返回 405 Method Not Allowed
+				engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		requestPath := c.Request.URL.Path
+
+		// 构造文件服务器需要处理的请求路径
+		// FileServer 会将请求路径与 http.Dir 的根路径结合
+		// 我们需要将请求路径设置为文件名，以便 FileServer 找到正确的文件
+		c.Request.URL.Path = "/" + fileName // FileServer 期望路径以 / 开头
+
+		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
+		ecw := AcquireErrorCapturingResponseWriter(c)
+		defer ReleaseErrorCapturingResponseWriter(ecw)
+
+		// 调用 FileServer 处理请求
+		fileServer.ServeHTTP(ecw, c.Request)
+
+		// 在 FileServer 处理完成后，检查是否捕获到错误状态码，并调用 ErrorHandler
+		ecw.processAfterFileServer()
+
+		// 恢复原始请求路径
+		c.Request.URL.Path = requestPath
+
+		// 中止处理链，因为 FileServer 已经处理了响应
+		c.Abort()
+	}
+
+	// 注册一个精确匹配的路由
+	engine.GET(relativePath, FileHandle)
+	engine.HEAD(relativePath, FileHandle)
+	engine.OPTIONS(relativePath, FileHandle)
+
+}
+
+// Group的StaticFile
+func (group *RouterGroup) StaticFile(relativePath, filePath string) {
+	// 清理路径
+	relativePath = path.Clean(relativePath)
+	filePath = path.Clean(filePath)
+
+	// 创建一个文件系统处理器，指向包含目标文件的目录
+	// http.Dir 需要一个目录路径
+	dir := path.Dir(filePath)
+	fileName := path.Base(filePath)
+	fileServer := http.FileServer(http.Dir(dir))
+
+	FileHandle := func(c *Context) {
+		// 检查是否是 GET 或 HEAD 方法
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			// 如果不是，且启用了 MethodNotAllowed 处理，则继续到 MethodNotAllowed 中间件
+			if group.engine.HandleMethodNotAllowed {
+				c.Next()
+			} else {
+				// 否则，返回 405 Method Not Allowed
+				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		requestPath := c.Request.URL.Path
+
+		// 构造文件服务器需要处理的请求路径
+		// FileServer 会将请求路径与 http.Dir 的根路径结合
+		// 我们需要将请求路径设置为文件名，以便 FileServer 找到正确的文件
+		c.Request.URL.Path = "/" + fileName // FileServer 期望路径以 / 开头
+
+		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
+		ecw := AcquireErrorCapturingResponseWriter(c)
+		defer ReleaseErrorCapturingResponseWriter(ecw)
+
+		// 调用 FileServer 处理请求
+		fileServer.ServeHTTP(ecw, c.Request)
+
+		// 在 FileServer 处理完成后，检查是否捕获到错误状态码，并调用 ErrorHandler
+		ecw.processAfterFileServer()
+
+		// 恢复原始请求路径
+		c.Request.URL.Path = requestPath
+
+		// 中止处理链，因为 FileServer 已经处理了响应
+		c.Abort()
+	}
+
+	// 注册一个精确匹配的路由
+	group.GET(relativePath, FileHandle)
+	group.HEAD(relativePath, FileHandle)
+	group.OPTIONS(relativePath, FileHandle)
+
+}
