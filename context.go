@@ -488,3 +488,28 @@ func (c *Context) GetHTTPC() *httpc.Client {
 func (c *Context) GetLogger() *reco.Logger {
 	return c.engine.LogReco
 }
+
+// === 日志记录 ===
+func (c *Context) Debugf(format string, args ...any) {
+	c.engine.LogReco.Debugf(format, args...)
+}
+
+func (c *Context) Infof(format string, args ...any) {
+	c.engine.LogReco.Infof(format, args...)
+}
+
+func (c *Context) Warnf(format string, args ...any) {
+	c.engine.LogReco.Warnf(format, args...)
+}
+
+func (c *Context) Errorf(format string, args ...any) {
+	c.engine.LogReco.Errorf(format, args...)
+}
+
+func (c *Context) Fatalf(format string, args ...any) {
+	c.engine.LogReco.Fatalf(format, args...)
+}
+
+func (c *Context) Panicf(format string, args ...any) {
+	c.engine.LogReco.Panicf(format, args...)
+}
