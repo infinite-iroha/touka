@@ -468,8 +468,7 @@ func (c *Context) ErrorUseHandle(code int) {
 		c.Abort()
 		return
 	} else {
-		// Default error handling if no custom handler is set
-		c.String(code, http.StatusText(code))
+		c.String(code, "%s", http.StatusText(code))
 		c.Abort()
 	}
 }
@@ -477,4 +476,9 @@ func (c *Context) ErrorUseHandle(code int) {
 // GetProtocol 获取当前连接版本
 func (c *Context) GetProtocol() string {
 	return c.Request.Proto
+}
+
+// GetHTTPC 获取框架自带传递的httpc
+func (c *Context) GetHTTPC() *httpc.Client {
+	return c.HTTPClient
 }
