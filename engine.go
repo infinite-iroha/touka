@@ -54,7 +54,8 @@ type Engine struct {
 
 	errorHandle ErrorHandle // 错误处理
 
-	noRoute HandlerFunc
+	noRoute  HandlerFunc   // NoRoute 处理器
+	noRoutes HandlersChain // NoRoutes 处理器链 (如果 noRoute 未设置，则使用此链)
 
 	unMatchFS         UnMatchFS    // 未匹配下的处理
 	unMatchFileServer http.Handler // 处理handle
@@ -139,6 +140,8 @@ func New() *Engine {
 		unMatchFS: UnMatchFS{
 			ServeUnmatchedAsFS: false,
 		},
+		noRoute:  nil,
+		noRoutes: make(HandlersChain, 0),
 	}
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
@@ -369,76 +372,6 @@ func (engine *Engine) handleRequest(c *Context) {
 			}
 		}
 	}
-	/*
-		// 如果没有找到路由，且启用了 MethodNotAllowed 处理
-		if engine.HandleMethodNotAllowed {
-			// 是否是OPTIONS方式
-			if httpMethod == http.MethodOptions {
-				// 如果是 OPTIONS 请求，尝试查找所有允许的方法
-				allowedMethods := []string{}
-				for _, treeIter := range engine.methodTrees {
-					var tempSkippedNodes []skippedNode
-					// 注意这里 treeIter.root 才是正确的，因为 treeIter 是 methodTree 类型
-					value := treeIter.root.getValue(requestPath, nil, &tempSkippedNodes, false)
-					if value.handlers != nil {
-						allowedMethods = append(allowedMethods, treeIter.method)
-					}
-				}
-				if len(allowedMethods) > 0 {
-					// 如果找到了允许的方法，返回 200 OK 并设置 Allow 头部
-					c.Writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-					c.Status(http.StatusOK)
-					return
-				}
-			}
-			// 尝试遍历所有方法树，看是否有其他方法可以匹配当前路径
-			for _, treeIter := range engine.methodTrees {
-				if treeIter.method == httpMethod { // 已经处理过当前方法，跳过
-					continue
-				}
-				var tempSkippedNodes []skippedNode // 用于临时查找，不影响主 Context
-				// 注意这里 treeIter.root 才是正确的，因为 treeIter 是 methodTree 类型
-				value := treeIter.root.getValue(requestPath, nil, &tempSkippedNodes, false) // 只查找是否存在，不需要参数
-				if value.handlers != nil {
-					// 使用定义的ErrorHandle处理
-					engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
-					return
-				}
-			}
-		}
-
-		// 是否开启了UnMatchFS
-		if engine.unMatchFS.ServeUnmatchedAsFS {
-			// 若不是GET HEAD OPTIONS则返回405
-			if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
-				// 使用 http.FileServer 处理未匹配的请求
-				fileServer := http.FileServer(engine.unMatchFS.FSForUnmatched)
-				//ecw := newErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
-				ecw := AcquireErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
-				defer ReleaseErrorCapturingResponseWriter(ecw)
-				fileServer.ServeHTTP(ecw, c.Request)
-				ecw.processAfterFileServer()
-				return
-			} else {
-				log.Printf("Not Allowed Method: %s", c.Request.Method)
-				// 若为OPTIONS
-				if c.Request.Method == http.MethodOptions {
-					//返回allow get
-					c.Writer.Header().Set("Allow", "GET")
-					c.Status(http.StatusOK)
-					c.Abort()
-					return
-				} else {
-					engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
-					return
-				}
-			}
-
-		} else {
-			engine.errorHandle.handler(c, http.StatusNotFound)
-			return
-		}
-	*/
 
 	// 构建处理链
 	// 组合全局中间件和路由处理函数
@@ -460,6 +393,8 @@ func (engine *Engine) handleRequest(c *Context) {
 	// 则在处理链的最后添加 NoRoute 处理器
 	if engine.noRoute != nil {
 		handlers = append(handlers, engine.noRoute)
+	} else if len(engine.noRoutes) > 0 {
+		handlers = append(handlers, engine.noRoutes...)
 	}
 
 	handlers = append(handlers, NotFound())
@@ -467,7 +402,6 @@ func (engine *Engine) handleRequest(c *Context) {
 	c.handlers = handlers
 	c.Next()         // 执行处理函数链
 	c.Writer.Flush() // 确保所有缓冲的响应数据被发送
-
 }
 
 // UnMatchFS HandleFunc
@@ -481,8 +415,6 @@ func unMatchFSHandle() HandlerFunc {
 		}
 		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
 			// 使用 http.FileServer 处理未匹配的请求
-			//fileServer := http.FileServer(engine.unMatchFS.FSForUnmatched)
-			//ecw := newErrorCapturingResponseWriter(c, c.engine.errorHandle.handler)
 			ecw := AcquireErrorCapturingResponseWriter(c)
 			defer ReleaseErrorCapturingResponseWriter(ecw)
 			c.engine.unMatchFileServer.ServeHTTP(ecw, c.Request)
@@ -563,6 +495,13 @@ func NotFound() HandlerFunc {
 // 传入并设置NoRoute (这不是最后一个处理, 你仍可以next到默认的404处理)
 func (Engine *Engine) NoRoute(handler HandlerFunc) {
 	Engine.noRoute = handler
+	Engine.noRoutes = nil
+}
+
+// 传入并设置NoRoutes (这不是最后一个处理, 你仍可以next到默认的404处理)
+func (Engine *Engine) NoRoutes(handlers HandlersChain) {
+	Engine.noRoute = nil
+	Engine.noRoutes = handlers
 }
 
 // combineHandlers 组合多个处理函数链为一个。
