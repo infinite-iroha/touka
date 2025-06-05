@@ -50,6 +50,8 @@ type Context struct {
 
 	// 引用所属的 Engine 实例，方便访问 Engine 的配置（如 HTMLRender）
 	engine *Engine
+
+	sameSite http.SameSite
 }
 
 // --- Context 相关方法实现 ---
@@ -77,6 +79,7 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	c.queryCache = nil                    // 清空查询参数缓存
 	c.formCache = nil                     // 清空表单数据缓存
 	c.ctx = req.Context()                 // 使用请求的上下文，继承其取消信号和值
+	c.sameSite = http.SameSiteDefaultMode // 默认 SameSite 模式
 	// c.HTTPClient 和 c.engine 保持不变，它们引用 Engine 实例的成员
 }
 
@@ -487,6 +490,58 @@ func (c *Context) GetHTTPC() *httpc.Client {
 // GetLogger 获取engine的Logger
 func (c *Context) GetLogger() *reco.Logger {
 	return c.engine.LogReco
+}
+
+// SetSameSite 设置响应的 SameSite cookie 属性。
+func (c *Context) SetSameSite(samesite http.SameSite) {
+	c.sameSite = samesite
+}
+
+// SetCookie 设置一个 HTTP cookie。
+func (c *Context) SetCookie(name, value string, maxAge int, path, domain string, secure, httpOnly bool) {
+	if path == "" {
+		path = "/"
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     name,
+		Value:    url.QueryEscape(value),
+		MaxAge:   maxAge,
+		Path:     path,
+		Domain:   domain,
+		SameSite: c.sameSite,
+		Secure:   secure,
+		HttpOnly: httpOnly,
+	})
+}
+
+func (c *Context) SetCookieData(cookie *http.Cookie) {
+	if cookie.Path == "" {
+		cookie.Path = "/"
+	}
+	if cookie.SameSite == http.SameSiteDefaultMode {
+		cookie.SameSite = c.sameSite
+	}
+	http.SetCookie(c.Writer, cookie)
+}
+
+// GetCookie 获取指定名称的 cookie 值。
+func (c *Context) GetCookie(name string) (string, error) {
+	cookie, err := c.Request.Cookie(name)
+	if err != nil {
+		return "", err
+	}
+	// 对 cookie 值进行 URL 解码
+	value, err := url.QueryUnescape(cookie.Value)
+	if err != nil {
+		return "", fmt.Errorf("failed to unescape cookie value: %w", err)
+	}
+	return value, nil
+}
+
+// DeleteCookie 删除指定名称的 cookie。
+// 通过设置 MaxAge 为 -1 来删除 cookie。
+func (c *Context) DeleteCookie(name string) {
+	c.SetCookie(name, "", -1, "/", "", false, false) // 设置 MaxAge 为 -1 删除 cookie
 }
 
 // === 日志记录 ===
