@@ -499,9 +499,9 @@ func (Engine *Engine) NoRoute(handler HandlerFunc) {
 }
 
 // 传入并设置NoRoutes (这不是最后一个处理, 你仍可以next到默认的404处理)
-func (Engine *Engine) NoRoutes(handlers HandlersChain) {
+func (Engine *Engine) NoRoutes(handlerFuncs ...HandlerFunc) {
 	Engine.noRoute = nil
-	Engine.noRoutes = handlers
+	Engine.noRoutes = handlerFuncs
 }
 
 // combineHandlers 组合多个处理函数链为一个。
