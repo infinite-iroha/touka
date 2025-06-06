@@ -345,8 +345,8 @@ func (engine *Engine) handleRequest(c *Context) {
 		if value.handlers != nil {
 			//c.handlers = engine.combineHandlers(engine.globalHandlers, value.handlers) // 组合全局中间件和路由处理函数
 			c.handlers = value.handlers
-			c.Next()         // 执行处理函数链
-			c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+			c.Next() // 执行处理函数链
+			//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 			return
 		}
 
@@ -400,8 +400,8 @@ func (engine *Engine) handleRequest(c *Context) {
 	handlers = append(handlers, NotFound())
 
 	c.handlers = handlers
-	c.Next()         // 执行处理函数链
-	c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+	c.Next() // 执行处理函数链
+	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 }
 
 // UnMatchFS HandleFunc
