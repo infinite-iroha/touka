@@ -331,6 +331,7 @@ func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (engine *Engine) handleRequest(c *Context) {
 	httpMethod := c.Request.Method
 	requestPath := c.Request.URL.Path
+	defer engine.pool.Put(c)
 
 	// 查找对应的路由树的根节点
 	rootNode := engine.methodTrees.get(httpMethod) // 这里获取到的 rootNode 已经是 *node 类型
@@ -345,8 +346,8 @@ func (engine *Engine) handleRequest(c *Context) {
 		if value.handlers != nil {
 			//c.handlers = engine.combineHandlers(engine.globalHandlers, value.handlers) // 组合全局中间件和路由处理函数
 			c.handlers = value.handlers
-			c.Next()         // 执行处理函数链
-			c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+			c.Next() // 执行处理函数链
+			//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 			return
 		}
 
@@ -400,8 +401,8 @@ func (engine *Engine) handleRequest(c *Context) {
 	handlers = append(handlers, NotFound())
 
 	c.handlers = handlers
-	c.Next()         // 执行处理函数链
-	c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+	c.Next() // 执行处理函数链
+	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 }
 
 // UnMatchFS HandleFunc
