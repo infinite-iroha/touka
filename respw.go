@@ -33,13 +33,12 @@ type responseWriterImpl struct {
 
 // NewResponseWriter 创建并返回一个 responseWriterImpl 实例
 func newResponseWriter(w http.ResponseWriter) ResponseWriter {
-	rw := &responseWriterImpl{
+	return &responseWriterImpl{
 		ResponseWriter: w,
 		status:         0, // 明确初始状态
 		size:           0,
 		hijacked:       false,
 	}
-	return rw
 }
 
 func (rw *responseWriterImpl) reset(w http.ResponseWriter) {

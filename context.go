@@ -60,7 +60,12 @@ type Context struct {
 // 每次从 sync.Pool 中获取 Context 后，都需要调用此方法进行初始化。
 func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 
-	c.Writer = newResponseWriter(w)
+	if rw, ok := c.Writer.(*responseWriterImpl); ok && !rw.IsHijacked() {
+		rw.reset(w)
+	} else {
+		c.Writer = newResponseWriter(w)
+	}
+	//c.Writer = newResponseWriter(w)
 
 	c.Request = req
 	c.Params = c.Params[:0] // 清空 Params 切片，而不是重新分配，以复用底层数组
