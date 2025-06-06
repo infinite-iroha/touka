@@ -331,7 +331,6 @@ func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (engine *Engine) handleRequest(c *Context) {
 	httpMethod := c.Request.Method
 	requestPath := c.Request.URL.Path
-	defer engine.pool.Put(c)
 
 	// 查找对应的路由树的根节点
 	rootNode := engine.methodTrees.get(httpMethod) // 这里获取到的 rootNode 已经是 *node 类型
