@@ -1,6 +1,6 @@
 module github.com/infinite-iroha/touka
 
-go 1.24.3
+go 1.24.4
 
 require (
 	github.com/WJQSERVER-STUDIO/go-utils/copyb v0.0.4
