@@ -171,9 +171,7 @@ func min(a, b int) int {
 
 ### 内置
 
-Recovery `r.Use(Recovery())`
-
-Touka Gzip `r.Use(Gzip(-1))`
+Recovery `r.Use(touka.Recovery())`
 
 ### fenthope
 
