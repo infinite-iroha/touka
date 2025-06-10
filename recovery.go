@@ -91,7 +91,7 @@ func defaultPanicHandler(c *Context, r interface{}) {
 	// 尝试发送 500 Internal Server Error 响应
 	// 使用框架提供的统一错误处理器（如果可用）
 	if c.engine != nil && c.engine.errorHandle.handler != nil {
-		c.engine.errorHandle.handler(c, http.StatusInternalServerError)
+		c.engine.errorHandle.handler(c, http.StatusInternalServerError, errors.New("Internal Panic Error"))
 	} else {
 		// 如果框架错误处理器不可用，提供一个备用的简单响应
 		// 返回英文错误信息

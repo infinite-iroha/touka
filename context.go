@@ -2,6 +2,7 @@ package touka
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"html/template"
@@ -44,8 +45,8 @@ type Context struct {
 	// 携带ctx以实现关闭逻辑
 	ctx context.Context
 
-	// HTTPClient 用于在此上下文中执行出站 HTTP 请求。
-	// 它由 Engine 提供。
+	// HTTPClient 用于在此上下文中执行出站 HTTP 请求
+	// 它由 Engine 提供
 	HTTPClient *httpc.Client
 
 	// 引用所属的 Engine 实例，方便访问 Engine 的配置（如 HTMLRender）
@@ -56,8 +57,8 @@ type Context struct {
 
 // --- Context 相关方法实现 ---
 
-// reset 重置 Context 对象以供复用。
-// 每次从 sync.Pool 中获取 Context 后，都需要调用此方法进行初始化。
+// reset 重置 Context 对象以供复用
+// 每次从 sync.Pool 中获取 Context 后，都需要调用此方法进行初始化
 func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 
 	if rw, ok := c.Writer.(*responseWriterImpl); ok && !rw.IsHijacked() {
@@ -80,8 +81,8 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	// c.HTTPClient 和 c.engine 保持不变，它们引用 Engine 实例的成员
 }
 
-// Next 在处理链中执行下一个处理函数。
-// 这是中间件模式的核心，允许请求依次经过多个处理函数。
+// Next 在处理链中执行下一个处理函数
+// 这是中间件模式的核心，允许请求依次经过多个处理函数
 func (c *Context) Next() {
 	c.index++
 	for c.index < int8(len(c.handlers)) {
@@ -90,25 +91,25 @@ func (c *Context) Next() {
 	}
 }
 
-// Abort 停止处理链的后续执行。
-// 通常在中间件中，当遇到错误或需要提前终止请求时调用。
+// Abort 停止处理链的后续执行
+// 通常在中间件中，当遇到错误或需要提前终止请求时调用
 func (c *Context) Abort() {
 	c.index = abortIndex // 将 index 设置为一个很大的值，使后续 Next() 调用跳过所有处理函数
 }
 
-// IsAborted 返回处理链是否已被中止。
+// IsAborted 返回处理链是否已被中止
 func (c *Context) IsAborted() bool {
 	return c.index >= abortIndex
 }
 
-// AbortWithStatus 中止处理链并设置 HTTP 状态码。
+// AbortWithStatus 中止处理链并设置 HTTP 状态码
 func (c *Context) AbortWithStatus(code int) {
 	c.Writer.WriteHeader(code) // 设置响应状态码
 	c.Abort()                  // 中止处理链
 }
 
-// Set 将一个键值对存储到 Context 中。
-// 这是一个线程安全的操作，用于在中间件之间传递数据。
+// Set 将一个键值对存储到 Context 中
+// 这是一个线程安全的操作，用于在中间件之间传递数据
 func (c *Context) Set(key string, value interface{}) {
 	c.mu.Lock() // 加写锁
 	if c.Keys == nil {
@@ -118,8 +119,8 @@ func (c *Context) Set(key string, value interface{}) {
 	c.mu.Unlock() // 解写锁
 }
 
-// Get 从 Context 中获取一个值。
-// 这是一个线程安全的操作。
+// Get 从 Context 中获取一个值
+// 这是一个线程安全的操作
 func (c *Context) Get(key string) (value interface{}, exists bool) {
 	c.mu.RLock() // 加读锁
 	value, exists = c.Keys[key]
@@ -127,8 +128,8 @@ func (c *Context) Get(key string) (value interface{}, exists bool) {
 	return
 }
 
-// MustGet 从 Context 中获取一个值，如果不存在则 panic。
-// 适用于确定值一定存在的场景。
+// MustGet 从 Context 中获取一个值，如果不存在则 panic
+// 适用于确定值一定存在的场景
 func (c *Context) MustGet(key string) interface{} {
 	if value, exists := c.Get(key); exists {
 		return value
@@ -136,8 +137,8 @@ func (c *Context) MustGet(key string) interface{} {
 	panic("Key \"" + key + "\" does not exist in context.")
 }
 
-// Query 从 URL 查询参数中获取值。
-// 懒加载解析查询参数，并进行缓存。
+// Query 从 URL 查询参数中获取值
+// 懒加载解析查询参数，并进行缓存
 func (c *Context) Query(key string) string {
 	if c.queryCache == nil {
 		c.queryCache = c.Request.URL.Query() // 首次访问时解析并缓存
@@ -145,7 +146,7 @@ func (c *Context) Query(key string) string {
 	return c.queryCache.Get(key)
 }
 
-// DefaultQuery 从 URL 查询参数中获取值，如果不存在则返回默认值。
+// DefaultQuery 从 URL 查询参数中获取值，如果不存在则返回默认值
 func (c *Context) DefaultQuery(key, defaultValue string) string {
 	if value := c.Query(key); value != "" {
 		return value
@@ -153,8 +154,8 @@ func (c *Context) DefaultQuery(key, defaultValue string) string {
 	return defaultValue
 }
 
-// PostForm 从 POST 请求体中获取表单值。
-// 懒加载解析表单数据，并进行缓存。
+// PostForm 从 POST 请求体中获取表单值
+// 懒加载解析表单数据，并进行缓存
 func (c *Context) PostForm(key string) string {
 	if c.formCache == nil {
 		c.Request.ParseMultipartForm(defaultMemory) // 解析 multipart/form-data 或 application/x-www-form-urlencoded
@@ -163,7 +164,7 @@ func (c *Context) PostForm(key string) string {
 	return c.formCache.Get(key)
 }
 
-// DefaultPostForm 从 POST 请求体中获取表单值，如果不存在则返回默认值。
+// DefaultPostForm 从 POST 请求体中获取表单值，如果不存在则返回默认值
 func (c *Context) DefaultPostForm(key, defaultValue string) string {
 	if value := c.PostForm(key); value != "" {
 		return value
@@ -171,8 +172,8 @@ func (c *Context) DefaultPostForm(key, defaultValue string) string {
 	return defaultValue
 }
 
-// Param 从 URL 路径参数中获取值。
-// 例如，对于路由 /users/:id，c.Param("id") 可以获取 id 的值。
+// Param 从 URL 路径参数中获取值
+// 例如，对于路由 /users/:id，c.Param("id") 可以获取 id 的值
 func (c *Context) Param(key string) string {
 	return c.Params.ByName(key)
 }
@@ -184,31 +185,47 @@ func (c *Context) Raw(code int, contentType string, data []byte) {
 	c.Writer.Write(data)
 }
 
-// String 向响应写入格式化的字符串。
+// String 向响应写入格式化的字符串
 func (c *Context) String(code int, format string, values ...interface{}) {
 	c.Writer.WriteHeader(code)
 	c.Writer.Write([]byte(fmt.Sprintf(format, values...)))
 }
 
-// JSON 向响应写入 JSON 数据。
-// 设置 Content-Type 为 application/json。
+// JSON 向响应写入 JSON 数据
+// 设置 Content-Type 为 application/json
 func (c *Context) JSON(code int, obj interface{}) {
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	// 实际 JSON 编码
+	// JSON 编码
 	jsonBytes, err := json.Marshal(obj)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to marshal JSON: %w", err))
-		c.String(http.StatusInternalServerError, "Internal Server Error: Failed to marshal JSON")
+		//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to marshal JSON")
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to marshal JSON: %w", err))
 		return
 	}
 	c.Writer.Write(jsonBytes)
 }
 
-// HTML 渲染 HTML 模板。
-// 如果 Engine 配置了 HTMLRender，则使用它进行渲染。
-// 否则，会进行简单的字符串输出。
-// 预留接口，可以扩展为支持多种模板引擎。
+// GOB 向响应写入GOB数据
+// 设置 Content-Type 为 application/octet-stream
+func (c *Context) GOB(code int, obj interface{}) {
+	c.Writer.Header().Set("Content-Type", "application/octet-stream") // 设置合适的 Content-Type
+	c.Writer.WriteHeader(code)
+	// GOB 编码
+	encoder := gob.NewEncoder(c.Writer)
+	if err := encoder.Encode(obj); err != nil {
+		c.AddError(fmt.Errorf("failed to encode GOB: %w", err))
+		//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to encode GOB")
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode GOB: %w", err))
+		return
+	}
+}
+
+// HTML 渲染 HTML 模板
+// 如果 Engine 配置了 HTMLRender，则使用它进行渲染
+// 否则，会进行简单的字符串输出
+// 预留接口，可以扩展为支持多种模板引擎
 func (c *Context) HTML(code int, name string, obj interface{}) {
 	c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	c.Writer.WriteHeader(code)
@@ -219,7 +236,8 @@ func (c *Context) HTML(code int, name string, obj interface{}) {
 			err := tpl.ExecuteTemplate(c.Writer, name, obj)
 			if err != nil {
 				c.AddError(fmt.Errorf("failed to render HTML template '%s': %w", name, err))
-				c.String(http.StatusInternalServerError, "Internal Server Error: Failed to render HTML template")
+				//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to render HTML template")
+				c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to render HTML template '%s': %w", name, err))
 			}
 			return
 		}
@@ -229,8 +247,8 @@ func (c *Context) HTML(code int, name string, obj interface{}) {
 	c.Writer.Write([]byte(fmt.Sprintf("<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj)))
 }
 
-// Redirect 执行 HTTP 重定向。
-// code 应为 3xx 状态码 (如 http.StatusMovedPermanently, http.StatusFound)。
+// Redirect 执行 HTTP 重定向
+// code 应为 3xx 状态码 (如 http.StatusMovedPermanently, http.StatusFound)
 func (c *Context) Redirect(code int, location string) {
 	http.Redirect(c.Writer, c.Request, location, code)
 	c.Abort()
@@ -239,7 +257,7 @@ func (c *Context) Redirect(code int, location string) {
 	}
 }
 
-// ShouldBindJSON 尝试将请求体绑定到 JSON 对象。
+// ShouldBindJSON 尝试将请求体绑定到 JSON 对象
 func (c *Context) ShouldBindJSON(obj interface{}) error {
 	if c.Request.Body == nil {
 		return errors.New("request body is empty")
@@ -257,9 +275,9 @@ func (c *Context) ShouldBindJSON(obj interface{}) error {
 	return nil
 }
 
-// ShouldBind 尝试将请求体绑定到各种类型（JSON, Form, XML 等）。
-// 这是一个复杂的通用绑定接口，通常根据 Content-Type 或其他头部来判断绑定方式。
-// 预留接口，可根据项目需求进行扩展。
+// ShouldBind 尝试将请求体绑定到各种类型（JSON, Form, XML 等）
+// 这是一个复杂的通用绑定接口，通常根据 Content-Type 或其他头部来判断绑定方式
+// 预留接口，可根据项目需求进行扩展
 func (c *Context) ShouldBind(obj interface{}) error {
 	// TODO: 完整的通用绑定逻辑
 	// 可以根据 c.Request.Header.Get("Content-Type") 来判断是 JSON, Form, XML 等
@@ -274,45 +292,45 @@ func (c *Context) ShouldBind(obj interface{}) error {
 	return errors.New("generic binding not fully implemented yet, implement based on Content-Type")
 }
 
-// AddError 添加一个错误到 Context。
-// 允许在处理请求过程中收集多个错误。
+// AddError 添加一个错误到 Context
+// 允许在处理请求过程中收集多个错误
 func (c *Context) AddError(err error) {
 	c.Errors = append(c.Errors, err)
 }
 
-// Errors 返回 Context 中收集的所有错误。
+// Errors 返回 Context 中收集的所有错误
 func (c *Context) GetErrors() []error {
 	return c.Errors
 }
 
-// Client 返回 Engine 提供的 HTTPClient。
-// 方便在请求处理函数中进行出站 HTTP 请求。
+// Client 返回 Engine 提供的 HTTPClient
+// 方便在请求处理函数中进行出站 HTTP 请求
 func (c *Context) Client() *httpc.Client {
 	return c.HTTPClient
 }
 
-// Context() 返回请求的上下文，用于取消操作。
-// 这是 Go 标准库的 `context.Context`，用于请求的取消和超时管理。
+// Context() 返回请求的上下文，用于取消操作
+// 这是 Go 标准库的 `context.Context`，用于请求的取消和超时管理
 func (c *Context) Context() context.Context {
 	return c.ctx
 }
 
 // Done returns a channel that is closed when the request context is cancelled or times out.
-// 继承自 `context.Context`。
+// 继承自 `context.Context`
 func (c *Context) Done() <-chan struct{} {
 	return c.ctx.Done()
 }
 
 // Err returns the error, if any, that caused the context to be canceled or to
 // time out.
-// 继承自 `context.Context`。
+// 继承自 `context.Context`
 func (c *Context) Err() error {
 	return c.ctx.Err()
 }
 
 // Value returns the value associated with this context for key, or nil if no
 // value is associated with key.
-// 可以用于从 Context 中获取与特定键关联的值，包括 Go 原生 Context 的值和 Touka Context 的 Keys。
+// 可以用于从 Context 中获取与特定键关联的值，包括 Go 原生 Context 的值和 Touka Context 的 Keys
 func (c *Context) Value(key interface{}) interface{} {
 	if keyAsString, ok := key.(string); ok {
 		if val, exists := c.Get(keyAsString); exists {
@@ -322,18 +340,18 @@ func (c *Context) Value(key interface{}) interface{} {
 	return c.ctx.Value(key) // 尝试从 Go 原生 Context 中获取值
 }
 
-// GetWriter 获得一个 io.Writer 接口，可以直接向响应体写入数据。
-// 这对于需要自定义流式写入或与其他需要 io.Writer 的库集成非常有用。
+// GetWriter 获得一个 io.Writer 接口，可以直接向响应体写入数据
+// 这对于需要自定义流式写入或与其他需要 io.Writer 的库集成非常有用
 func (c *Context) GetWriter() io.Writer {
 	return c.Writer // ResponseWriter 接口嵌入了 http.ResponseWriter，而 http.ResponseWriter 实现了 io.Writer
 }
 
-// WriteStream 接受一个 io.Reader 并将其内容流式传输到响应体。
-// 返回写入的字节数和可能遇到的错误。
-// 该方法在开始写入之前，会确保设置 HTTP 状态码为 200 OK。
+// WriteStream 接受一个 io.Reader 并将其内容流式传输到响应体
+// 返回写入的字节数和可能遇到的错误
+// 该方法在开始写入之前，会确保设置 HTTP 状态码为 200 OK
 func (c *Context) WriteStream(reader io.Reader) (written int64, err error) {
-	// 确保在写入数据前设置状态码。
-	// WriteHeader 会在第一次写入时被 Write 方法隐式调用，但显式调用可以确保状态码的预期。
+	// 确保在写入数据前设置状态码
+	// WriteHeader 会在第一次写入时被 Write 方法隐式调用，但显式调用可以确保状态码的预期
 	if !c.Writer.Written() {
 		c.Writer.WriteHeader(http.StatusOK) // 默认 200 OK
 	}
@@ -346,14 +364,14 @@ func (c *Context) WriteStream(reader io.Reader) (written int64, err error) {
 }
 
 // GetReqBody 以获取一个 io.ReadCloser 接口，用于读取请求体
-// 注意：请求体只能读取一次。
+// 注意：请求体只能读取一次
 func (c *Context) GetReqBody() io.ReadCloser {
 	return c.Request.Body
 }
 
 // GetReqBodyFull
-// GetReqBodyFull 读取并返回请求体的所有内容。
-// 注意：请求体只能读取一次。
+// GetReqBodyFull 读取并返回请求体的所有内容
+// 注意：请求体只能读取一次
 func (c *Context) GetReqBodyFull() ([]byte, error) {
 	if c.Request.Body == nil {
 		return nil, nil
@@ -367,9 +385,9 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 	return data, nil
 }
 
-// RequestIP 返回客户端的 IP 地址。
+// RequestIP 返回客户端的 IP 地址
 // 它会根据 Engine 的配置 (ForwardByClientIP) 尝试从 X-Forwarded-For 或 X-Real-IP 等头部获取，
-// 否则回退到 Request.RemoteAddr。
+// 否则回退到 Request.RemoteAddr
 func (c *Context) RequestIP() string {
 	if c.engine.ForwardByClientIP {
 		for _, headerName := range c.engine.RemoteIPHeaders {
@@ -409,63 +427,68 @@ func (c *Context) RequestIP() string {
 	return ""
 }
 
-// ClientIP 返回客户端的 IP 地址。
-// 这是一个别名，与 RequestIP 功能相同。
+// ClientIP 返回客户端的 IP 地址
+// 这是一个别名，与 RequestIP 功能相同
 func (c *Context) ClientIP() string {
 	return c.RequestIP()
 }
 
-// ContentType 返回请求的 Content-Type 头部。
+// ContentType 返回请求的 Content-Type 头部
 func (c *Context) ContentType() string {
 	return c.GetReqHeader("Content-Type")
 }
 
-// UserAgent 返回请求的 User-Agent 头部。
+// UserAgent 返回请求的 User-Agent 头部
 func (c *Context) UserAgent() string {
 	return c.GetReqHeader("User-Agent")
 }
 
-// Status 设置响应状态码。
+// Status 设置响应状态码
 func (c *Context) Status(code int) {
 	c.Writer.WriteHeader(code)
 }
 
-// File 将指定路径的文件作为响应发送。
-// 它会设置 Content-Type 和 Content-Disposition 头部。
+// File 将指定路径的文件作为响应发送
+// 它会设置 Content-Type 和 Content-Disposition 头部
 func (c *Context) File(filepath string) {
 	http.ServeFile(c.Writer, c.Request, filepath)
 	c.Abort() // 发送文件后中止后续处理
 }
 
-// SetHeader 设置响应头部。
+// SetHeader 设置响应头部
 func (c *Context) SetHeader(key, value string) {
 	c.Writer.Header().Set(key, value)
 }
 
-// AddHeader 添加响应头部。
+// AddHeader 添加响应头部
 func (c *Context) AddHeader(key, value string) {
 	c.Writer.Header().Add(key, value)
 }
 
-// DelHeader 删除响应头部。
+// Header 作为SetHeader的别名
+func (c *Context) Header(key, value string) {
+	c.SetHeader(key, value)
+}
+
+// DelHeader 删除响应头部
 func (c *Context) DelHeader(key string) {
 	c.Writer.Header().Del(key)
 }
 
-// GetReqHeader 获取请求头部的值。
+// GetReqHeader 获取请求头部的值
 func (c *Context) GetReqHeader(key string) string {
 	return c.Request.Header.Get(key)
 }
 
-// GetAllReqHeader 获取所有请求头部。
+// GetAllReqHeader 获取所有请求头部
 func (c *Context) GetAllReqHeader() http.Header {
 	return c.Request.Header
 }
 
 // 使用定义的errorHandle来处理error并结束当前handle
-func (c *Context) ErrorUseHandle(code int) {
+func (c *Context) ErrorUseHandle(code int, err error) {
 	if c.engine != nil && c.engine.errorHandle.handler != nil {
-		c.engine.errorHandle.handler(c, code)
+		c.engine.errorHandle.handler(c, code, err)
 		c.Abort()
 		return
 	} else {
@@ -489,12 +512,12 @@ func (c *Context) GetLogger() *reco.Logger {
 	return c.engine.LogReco
 }
 
-// SetSameSite 设置响应的 SameSite cookie 属性。
+// SetSameSite 设置响应的 SameSite cookie 属性
 func (c *Context) SetSameSite(samesite http.SameSite) {
 	c.sameSite = samesite
 }
 
-// SetCookie 设置一个 HTTP cookie。
+// SetCookie 设置一个 HTTP cookie
 func (c *Context) SetCookie(name, value string, maxAge int, path, domain string, secure, httpOnly bool) {
 	if path == "" {
 		path = "/"
@@ -521,7 +544,7 @@ func (c *Context) SetCookieData(cookie *http.Cookie) {
 	http.SetCookie(c.Writer, cookie)
 }
 
-// GetCookie 获取指定名称的 cookie 值。
+// GetCookie 获取指定名称的 cookie 值
 func (c *Context) GetCookie(name string) (string, error) {
 	cookie, err := c.Request.Cookie(name)
 	if err != nil {
@@ -535,8 +558,8 @@ func (c *Context) GetCookie(name string) (string, error) {
 	return value, nil
 }
 
-// DeleteCookie 删除指定名称的 cookie。
-// 通过设置 MaxAge 为 -1 来删除 cookie。
+// DeleteCookie 删除指定名称的 cookie
+// 通过设置 MaxAge 为 -1 来删除 cookie
 func (c *Context) DeleteCookie(name string) {
 	c.SetCookie(name, "", -1, "/", "", false, false) // 设置 MaxAge 为 -1 删除 cookie
 }

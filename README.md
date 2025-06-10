@@ -171,9 +171,7 @@ func min(a, b int) int {
 
 ### 内置
 
-Recovery `r.Use(Recovery())`
-
-Touka Gzip `r.Use(Gzip(-1))`
+Recovery `r.Use(touka.Recovery())`
 
 ### fenthope
 
@@ -206,7 +204,7 @@ Touka Gzip `r.Use(Gzip(-1))`
 
 ## 许可证
 
-本项目在v0阶段使用WJQSERVER STUDIO LICENSE许可证, 后续进行调整
+本项目使用MPL许可证
 
 tree部分来自[gin](https://github.com/gin-gonic/gin)与[httprouter](https://github.com/julienschmidt/httprouter)
 

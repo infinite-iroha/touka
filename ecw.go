@@ -136,7 +136,7 @@ func (ecw *errorCapturingResponseWriter) processAfterFileServer() {
 			ecw.ctx.Next()
 		} else {
 			// 调用用户自定义的 ErrorHandlerFunc, 由它负责完整的错误响应
-			ecw.errorHandlerFunc(ecw.ctx, ecw.Status())
+			ecw.errorHandlerFunc(ecw.ctx, ecw.Status(), errors.New("file server error"))
 			ecw.ctx.Abort()
 		}
 	}
