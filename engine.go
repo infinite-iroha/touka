@@ -2,6 +2,7 @@ package touka
 
 import (
 	"context"
+	"errors"
 	"log"
 	"reflect"
 	"runtime"
@@ -70,10 +71,10 @@ type ErrorHandle struct {
 	handler    ErrorHandler
 }
 
-type ErrorHandler func(c *Context, code int)
+type ErrorHandler func(c *Context, code int, err error)
 
 // defaultErrorHandle 默认错误处理
-func defaultErrorHandle(c *Context, code int) { // 检查客户端是否已断开连接
+func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是否已断开连接
 	select {
 	case <-c.Request.Context().Done():
 
@@ -86,6 +87,7 @@ func defaultErrorHandle(c *Context, code int) { // 检查客户端是否已断�
 		c.JSON(code, H{
 			"code":    code,
 			"message": http.StatusText(code),
+			"error":   err,
 		})
 		c.Writer.Flush()
 		c.Abort()
@@ -95,17 +97,17 @@ func defaultErrorHandle(c *Context, code int) { // 检查客户端是否已断�
 
 // 默认errorhandle包装 避免竞争意外问题, 保证稳定性
 func defaultErrorWarp(handler ErrorHandler) ErrorHandler {
-	return func(c *Context, code int) {
+	return func(c *Context, code int, err error) {
 		select {
 		case <-c.Request.Context().Done():
 			return
 		default:
 			if c.Writer.Written() {
-				log.Printf("errpage: response already started for status %d, skipping error page rendering", code)
+				log.Printf("errpage: response already started for status %d, skipping error page rendering,  err: %v", code, err)
 				return
 			}
 		}
-		handler(c, code)
+		handler(c, code, err)
 	}
 }
 
@@ -431,7 +433,7 @@ func unMatchFSHandle() HandlerFunc {
 					c.Abort()
 					return
 				} else {
-					engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+					engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 					return
 				}
 			} else {
@@ -476,7 +478,7 @@ func MethodNotAllowed() HandlerFunc {
 			value := treeIter.root.getValue(requestPath, nil, &tempSkippedNodes, false) // 只查找是否存在，不需要参数
 			if value.handlers != nil {
 				// 使用定义的ErrorHandle处理
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 				return
 			}
 		}
@@ -487,7 +489,7 @@ func MethodNotAllowed() HandlerFunc {
 func NotFound() HandlerFunc {
 	return func(c *Context) {
 		engine := c.engine
-		engine.errorHandle.handler(c, http.StatusNotFound)
+		engine.errorHandle.handler(c, http.StatusNotFound, errors.New("not found"))
 		return
 	}
 }
@@ -682,7 +684,7 @@ func (engine *Engine) Static(relativePath, rootPath string) {
 				c.Next()
 			} else {
 				// 否则，返回 405 Method Not Allowed
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 			}
 			return
 		}
@@ -746,7 +748,7 @@ func (group *RouterGroup) Static(relativePath, rootPath string) {
 				c.Next()
 			} else {
 				// 否则，返回 405 Method Not Allowed
-				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 			}
 			return
 		}
@@ -805,7 +807,7 @@ func (engine *Engine) StaticFile(relativePath, filePath string) {
 				c.Next()
 			} else {
 				// 否则，返回 405 Method Not Allowed
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 			}
 			return
 		}
@@ -861,7 +863,7 @@ func (group *RouterGroup) StaticFile(relativePath, filePath string) {
 				c.Next()
 			} else {
 				// 否则，返回 405 Method Not Allowed
-				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed)
+				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 			}
 			return
 		}

@@ -2,6 +2,7 @@ package touka
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"html/template"
@@ -195,14 +196,30 @@ func (c *Context) String(code int, format string, values ...interface{}) {
 func (c *Context) JSON(code int, obj interface{}) {
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	// 实际 JSON 编码
+	// JSON 编码
 	jsonBytes, err := json.Marshal(obj)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to marshal JSON: %w", err))
-		c.String(http.StatusInternalServerError, "Internal Server Error: Failed to marshal JSON")
+		//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to marshal JSON")
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to marshal JSON: %w", err))
 		return
 	}
 	c.Writer.Write(jsonBytes)
+}
+
+// GOB 向响应写入GOB数据
+// 设置 Content-Type 为 application/octet-stream
+func (c *Context) GOB(code int, obj interface{}) {
+	c.Writer.Header().Set("Content-Type", "application/octet-stream") // 设置合适的 Content-Type
+	c.Writer.WriteHeader(code)
+	// GOB 编码
+	encoder := gob.NewEncoder(c.Writer)
+	if err := encoder.Encode(obj); err != nil {
+		c.AddError(fmt.Errorf("failed to encode GOB: %w", err))
+		//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to encode GOB")
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode GOB: %w", err))
+		return
+	}
 }
 
 // HTML 渲染 HTML 模板
@@ -219,7 +236,8 @@ func (c *Context) HTML(code int, name string, obj interface{}) {
 			err := tpl.ExecuteTemplate(c.Writer, name, obj)
 			if err != nil {
 				c.AddError(fmt.Errorf("failed to render HTML template '%s': %w", name, err))
-				c.String(http.StatusInternalServerError, "Internal Server Error: Failed to render HTML template")
+				//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to render HTML template")
+				c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to render HTML template '%s': %w", name, err))
 			}
 			return
 		}
@@ -468,9 +486,9 @@ func (c *Context) GetAllReqHeader() http.Header {
 }
 
 // 使用定义的errorHandle来处理error并结束当前handle
-func (c *Context) ErrorUseHandle(code int) {
+func (c *Context) ErrorUseHandle(code int, err error) {
 	if c.engine != nil && c.engine.errorHandle.handler != nil {
-		c.engine.errorHandle.handler(c, code)
+		c.engine.errorHandle.handler(c, code, err)
 		c.Abort()
 		return
 	} else {
