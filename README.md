@@ -204,7 +204,7 @@ Recovery `r.Use(touka.Recovery())`
 
 ## 许可证
 
-本项目在v0阶段使用WJQSERVER STUDIO LICENSE许可证, 后续进行调整
+本项目使用MPL许可证
 
 tree部分来自[gin](https://github.com/gin-gonic/gin)与[httprouter](https://github.com/julienschmidt/httprouter)
 
