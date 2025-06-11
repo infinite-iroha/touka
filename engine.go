@@ -916,7 +916,6 @@ var (
 	MethodConnect = "CONNECT"
 	MethodOptions = "OPTIONS"
 	MethodTrace   = "TRACE"
-	MethodAny     = "ANY"
 )
 
 var MethodsSet = map[string]struct{}{
@@ -929,7 +928,6 @@ var MethodsSet = map[string]struct{}{
 	MethodConnect: {},
 	MethodOptions: {},
 	MethodTrace:   {},
-	MethodAny:     {},
 }
 
 // HandleFunc 注册一个或多个 HTTP 方法的路由
