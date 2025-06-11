@@ -1,6 +1,7 @@
 package touka
 
 import (
+	"bytes"
 	"context"
 	"encoding/gob"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fenthope/reco"
 	"github.com/go-json-experiment/json"
@@ -126,6 +128,72 @@ func (c *Context) Get(key string) (value interface{}, exists bool) {
 	value, exists = c.Keys[key]
 	c.mu.RUnlock() // 解读锁
 	return
+}
+
+// GetString 从 Context 中获取一个字符串值
+// 这是一个线程安全的操作
+func (c *Context) GetString(key string) (value string, exists bool) {
+	if val, exists := c.Get(key); exists {
+		if str, ok := val.(string); ok {
+			return str, true
+		}
+	}
+	return "", false
+}
+
+// GetInt 从 Context 中获取一个 int 值
+// 这是一个线程安全的操作
+func (c *Context) GetInt(key string) (value int, exists bool) {
+	if val, exists := c.Get(key); exists {
+		if i, ok := val.(int); ok {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// GetBool 从 Context 中获取一个 bool 值
+// 这是一个线程安全的操作
+func (c *Context) GetBool(key string) (value bool, exists bool) {
+	if val, exists := c.Get(key); exists {
+		if b, ok := val.(bool); ok {
+			return b, true
+		}
+	}
+	return false, false
+}
+
+// GetFloat64 从 Context 中获取一个 float64 值
+// 这是一个线程安全的操作
+func (c *Context) GetFloat64(key string) (value float64, exists bool) {
+	if val, exists := c.Get(key); exists {
+		if f, ok := val.(float64); ok {
+			return f, true
+		}
+	}
+	return 0.0, false
+}
+
+// GetTime 从 Context 中获取一个 time.Time 值
+// 这是一个线程安全的操作
+func (c *Context) GetTime(key string) (value time.Time, exists bool) {
+	if val, exists := c.Get(key); exists {
+		if t, ok := val.(time.Time); ok {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// GetDuration 从 Context 中获取一个 time.Duration 值
+// 这是一个线程安全的操作
+func (c *Context) GetDuration(key string) (value time.Duration, exists bool) {
+	if val, exists := c.Get(key); exists {
+		if d, ok := val.(time.Duration); ok {
+			return d, true
+		}
+	}
+	return 0, false
 }
 
 // MustGet 从 Context 中获取一个值，如果不存在则 panic
@@ -369,7 +437,6 @@ func (c *Context) GetReqBody() io.ReadCloser {
 	return c.Request.Body
 }
 
-// GetReqBodyFull
 // GetReqBodyFull 读取并返回请求体的所有内容
 // 注意：请求体只能读取一次
 func (c *Context) GetReqBodyFull() ([]byte, error) {
@@ -383,6 +450,20 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 	return data, nil
+}
+
+// 类似 GetReqBodyFull, 返回 *bytes.Buffer
+func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
+	if c.Request.Body == nil {
+		return nil, nil
+	}
+	defer c.Request.Body.Close() // 确保请求体被关闭
+	data, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to read request body: %w", err))
+		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+	return bytes.NewBuffer(data), nil
 }
 
 // RequestIP 返回客户端的 IP 地址
@@ -511,6 +592,50 @@ func (c *Context) GetHTTPC() *httpc.Client {
 func (c *Context) GetLogger() *reco.Logger {
 	return c.engine.LogReco
 }
+
+// GetReqQueryString
+// GetReqQueryString 返回请求的原始查询字符串
+func (c *Context) GetReqQueryString() string {
+	return c.Request.URL.RawQuery
+}
+
+// SetBodyStream 设置响应体为一个 io.Reader，并指定内容长度
+// 如果 contentSize 为 -1，则表示内容长度未知，将使用 Transfer-Encoding: chunked
+func (c *Context) SetBodyStream(reader io.Reader, contentSize int) {
+	// 确保在写入数据前设置状态码
+	if !c.Writer.Written() {
+		c.Writer.WriteHeader(http.StatusOK) // 默认 200 OK
+	}
+
+	// 如果指定了内容长度且大于等于 0，则设置 Content-Length 头部
+	if contentSize >= 0 {
+		c.Writer.Header().Set("Content-Length", fmt.Sprintf("%d", contentSize))
+	} else {
+		// 如果内容长度未知，移除 Content-Length 头部，通常会使用 Transfer-Encoding: chunked
+		c.Writer.Header().Del("Content-Length")
+	}
+
+	// 将 reader 的内容直接复制到 ResponseWriter
+	// ResponseWriter 实现了 io.Writer 接口
+	_, err := copyb.Copy(c.Writer, reader)
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to write stream: %w", err))
+		// 注意：这里可能无法设置错误状态码，因为头部可能已经发送
+		// 可以在调用 SetBodyStream 之前检查错误，或者在中间件中处理 Context.Errors
+	}
+}
+
+// GetRequestURI 返回请求的原始 URI
+func (c *Context) GetRequestURI() string {
+	return c.Request.RequestURI
+}
+
+// GetRequestURIPath 返回请求的原始 URI 的路径部分
+func (c *Context) GetRequestURIPath() string {
+	return c.Request.URL.Path
+}
+
+// == cookie ===
 
 // SetSameSite 设置响应的 SameSite cookie 属性
 func (c *Context) SetSameSite(samesite http.SameSite) {

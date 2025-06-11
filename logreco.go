@@ -34,3 +34,9 @@ func CloseLogger(logger *reco.Logger) {
 		return
 	}
 }
+
+func (engine *Engine) CloseLogger() {
+	if engine.LogReco != nil {
+		CloseLogger(engine.LogReco)
+	}
+}
