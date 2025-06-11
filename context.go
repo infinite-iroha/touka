@@ -602,17 +602,17 @@ func (c *Context) GetReqQueryString() string {
 // SetBodyStream 设置响应体为一个 io.Reader，并指定内容长度
 // 如果 contentSize 为 -1，则表示内容长度未知，将使用 Transfer-Encoding: chunked
 func (c *Context) SetBodyStream(reader io.Reader, contentSize int) {
-	// 确保在写入数据前设置状态码
-	if !c.Writer.Written() {
-		c.Writer.WriteHeader(http.StatusOK) // 默认 200 OK
-	}
-
 	// 如果指定了内容长度且大于等于 0，则设置 Content-Length 头部
 	if contentSize >= 0 {
 		c.Writer.Header().Set("Content-Length", fmt.Sprintf("%d", contentSize))
 	} else {
 		// 如果内容长度未知，移除 Content-Length 头部，通常会使用 Transfer-Encoding: chunked
 		c.Writer.Header().Del("Content-Length")
+	}
+
+	// 确保在写入数据前设置状态码
+	if !c.Writer.Written() {
+		c.Writer.WriteHeader(http.StatusOK) // 默认 200 OK
 	}
 
 	// 将 reader 的内容直接复制到 ResponseWriter
