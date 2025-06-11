@@ -3,6 +3,7 @@ package touka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"runtime"
@@ -147,7 +148,7 @@ func New() *Engine {
 	}
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
-	engine.SetLogger(defaultLogRecoConfig)
+	engine.SetLoggerCfg(defaultLogRecoConfig)
 	// 初始化 Context Pool，为每个新 Context 实例提供一个构造函数
 	engine.pool.New = func() interface{} {
 		return &Context{
@@ -173,8 +174,13 @@ func Default() *Engine {
 
 // === 外部操作方法 ===
 
-// 配置日志Logger
-func (engine *Engine) SetLogger(logcfg reco.Config) {
+// SetLogger传入实例
+func (engine *Engine) SetLogger(logger *reco.Logger) {
+	engine.LogReco = logger
+}
+
+// 配置日志LoggerCfg
+func (engine *Engine) SetLoggerCfg(logcfg reco.Config) {
 	engine.LogReco = NewLogger(logcfg)
 }
 
@@ -659,8 +665,9 @@ func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) IR
 
 // == 其他操作方式 ===
 
-// Static FileServer 传入一个文件夹路径, 使用FileServer进行处理
-func (engine *Engine) Static(relativePath, rootPath string) {
+// StaticDir 传入一个文件夹路径, 使用FileServer进行处理
+// r.StaticDir("/test/*filepath", "/var/www/test")
+func (engine *Engine) StaticDir(relativePath, rootPath string) {
 	// 清理路径
 	relativePath = path.Clean(relativePath)
 	rootPath = path.Clean(rootPath)
@@ -723,8 +730,8 @@ func (engine *Engine) Static(relativePath, rootPath string) {
 	})
 }
 
-// Group的Static
-func (group *RouterGroup) Static(relativePath, rootPath string) {
+// Group的StaticDir方式
+func (group *RouterGroup) StaticDir(relativePath, rootPath string) {
 	// 清理路径
 	relativePath = path.Clean(relativePath)
 	rootPath = path.Clean(rootPath)
@@ -896,5 +903,85 @@ func (group *RouterGroup) StaticFile(relativePath, filePath string) {
 	group.GET(relativePath, FileHandle)
 	group.HEAD(relativePath, FileHandle)
 	group.OPTIONS(relativePath, FileHandle)
+}
 
+// 维护一个Methods列表
+var (
+	MethodGet     = "GET"
+	MethodHead    = "HEAD"
+	MethodPost    = "POST"
+	MethodPut     = "PUT"
+	MethodPatch   = "PATCH"
+	MethodDelete  = "DELETE"
+	MethodConnect = "CONNECT"
+	MethodOptions = "OPTIONS"
+	MethodTrace   = "TRACE"
+)
+
+var MethodsSet = map[string]struct{}{
+	MethodGet:     {},
+	MethodHead:    {},
+	MethodPost:    {},
+	MethodPut:     {},
+	MethodPatch:   {},
+	MethodDelete:  {},
+	MethodConnect: {},
+	MethodOptions: {},
+	MethodTrace:   {},
+}
+
+// HandleFunc 注册一个或多个 HTTP 方法的路由
+// methods 参数是一个字符串切片，包含要注册的 HTTP 方法（例如 []string{"GET", "POST"}）
+// relativePath 是相对于当前组或 Engine 的路径
+// handlers 是处理函数链
+func (engine *Engine) HandleFunc(methods []string, relativePath string, handlers ...HandlerFunc) {
+	for _, method := range methods {
+		if _, ok := MethodsSet[method]; !ok {
+			panic("invalid method: " + method)
+		}
+		engine.Handle(method, relativePath, handlers...)
+	}
+}
+
+// HandleFunc 注册一个或多个 HTTP 方法的路由
+// methods 参数是一个字符串切片，包含要注册的 HTTP 方法（例如 []string{"GET", "POST"}）
+// relativePath 是相对于当前组或 Engine 的路径
+// handlers 是处理函数链
+func (group *RouterGroup) HandleFunc(methods []string, relativePath string, handlers ...HandlerFunc) {
+	for _, method := range methods {
+		if _, ok := MethodsSet[method]; !ok {
+			panic("invalid method: " + method)
+		}
+		group.Handle(method, relativePath, handlers...)
+	}
+}
+
+// FileServer方式, 返回一个HandleFunc, 统一化处理
+func FileServer(fs http.FileSystem) HandlerFunc {
+	return func(c *Context) {
+		// 检查是否是 GET 或 HEAD 方法
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			// 如果不是，且启用了 MethodNotAllowed 处理，则继续到 MethodNotAllowed 中间件
+			if c.engine.HandleMethodNotAllowed {
+				c.Next()
+			} else {
+				// 否则，返回 405 Method Not Allowed
+				c.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, fmt.Errorf("Method %s is Not Allowed on FileServer", c.Request.Method))
+			}
+			return
+		}
+
+		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
+		ecw := AcquireErrorCapturingResponseWriter(c)
+		defer ReleaseErrorCapturingResponseWriter(ecw)
+
+		// 调用 http.FileServer 处理请求
+		http.FileServer(fs).ServeHTTP(ecw, c.Request)
+
+		// 在 FileServer 处理完成后，检查是否捕获到错误状态码，并调用 ErrorHandler
+		ecw.processAfterFileServer()
+
+		// 中止处理链，因为 FileServer 已经处理了响应
+		c.Abort()
+	}
 }
