@@ -97,7 +97,7 @@ func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是
 		c.JSON(code, H{
 			"code":    code,
 			"message": http.StatusText(code),
-			"error":   err,
+			"error":   err.Error(),
 		})
 		c.Writer.Flush()
 		c.Abort()
