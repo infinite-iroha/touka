@@ -94,10 +94,14 @@ func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是
 			return
 		}
 		// 输出json 状态码与状态码对应描述
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
 		c.JSON(code, H{
 			"code":    code,
 			"message": http.StatusText(code),
-			"error":   err.Error(),
+			"error":   errMsg,
 		})
 		c.Writer.Flush()
 		c.Abort()
