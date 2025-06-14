@@ -561,6 +561,15 @@ func (c *Context) GetReqHeader(key string) string {
 	return c.Request.Header.Get(key)
 }
 
+// SetHeaders 接受headers列表
+func (c *Context) SetHeaders(headers map[string][]string) {
+	for key, values := range headers {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+}
+
 // GetAllReqHeader 获取所有请求头部
 func (c *Context) GetAllReqHeader() http.Header {
 	return c.Request.Header
