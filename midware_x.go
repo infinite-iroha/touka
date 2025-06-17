@@ -1,9 +1,9 @@
 package touka
 
-// UseIf 是一个条件中间件包装器。
+// UseChainIf 是一个条件中间件包装器。
 // 如果 `condition` 为 true，它将执行提供的 `middlewares` 链。
 // 如果 `condition` 为 false，它会直接跳过这些中间件，调用下一个处理器。
-func (engine *Engine) UseIf(condition bool, middlewares ...HandlerFunc) HandlerFunc {
+func (engine *Engine) UseChainIf(condition bool, middlewares ...HandlerFunc) HandlerFunc {
 	if !condition {
 		return func(c *Context) {
 			c.Next()
@@ -37,4 +37,15 @@ func (engine *Engine) UseIf(condition bool, middlewares ...HandlerFunc) HandlerF
 		// 5. 调用 c.Next() 来启动子链的执行。
 		c.Next()
 	}
+}
+
+// UseIf 是一个条件中间件包装器
+func (engine *Engine) UseIf(condition bool, middlewares HandlerFunc) HandlerFunc {
+	if !condition {
+		return func(c *Context) {
+			c.Next()
+		}
+	}
+
+	return middlewares
 }
