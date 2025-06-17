@@ -560,7 +560,8 @@ func (engine *Engine) Use(middleware ...HandlerFunc) IRouter {
 // Handle 注册通用 HTTP 方法的路由
 // 这是所有具体 HTTP 方法注册的基础方法
 func (engine *Engine) Handle(httpMethod, relativePath string, handlers ...HandlerFunc) {
-	absolutePath := path.Join("/", relativePath) // 修正：统一使用 path.Join 进行路径拼接
+	//absolutePath := path.Join("/", relativePath) // 修正：统一使用 path.Join 进行路径拼接
+	absolutePath := resolveRoutePath("/", relativePath)
 	// 修正：将全局中间件与此路由的处理函数合并
 	fullHandlers := engine.combineHandlers(engine.globalHandlers, handlers)
 	engine.addRoute(httpMethod, absolutePath, "/", fullHandlers)
@@ -622,7 +623,7 @@ func (engine *Engine) GetRouterInfo() []RouteInfo {
 func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) IRouter {
 	return &RouterGroup{
 		Handlers: engine.combineHandlers(engine.globalHandlers, handlers), // 继承全局中间件
-		basePath: path.Join("/", relativePath),
+		basePath: resolveRoutePath("/", relativePath),
 		engine:   engine, // 指向 Engine 实例
 	}
 }
@@ -645,7 +646,7 @@ func (group *RouterGroup) Use(middleware ...HandlerFunc) IRouter {
 // Handle 注册通用 HTTP 方法的路由到当前组
 // 路径是相对于当前组的 basePath
 func (group *RouterGroup) Handle(httpMethod, relativePath string, handlers ...HandlerFunc) {
-	absolutePath := path.Join(group.basePath, relativePath)
+	absolutePath := resolveRoutePath(group.basePath, relativePath)
 	fullHandlers := group.engine.combineHandlers(group.Handlers, handlers)
 	group.engine.addRoute(httpMethod, absolutePath, group.basePath, fullHandlers)
 }
@@ -686,7 +687,7 @@ func (group *RouterGroup) ANY(relativePath string, handlers ...HandlerFunc) {
 func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) IRouter {
 	return &RouterGroup{
 		Handlers: group.engine.combineHandlers(group.Handlers, handlers),
-		basePath: path.Join(group.basePath, relativePath),
+		basePath: resolveRoutePath(group.basePath, relativePath),
 		engine:   group.engine, // 指向 Engine 实例
 	}
 }

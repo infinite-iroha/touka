@@ -570,6 +570,11 @@ func (c *Context) SetHeaders(headers map[string][]string) {
 	}
 }
 
+// 获取所有resp Headers
+func (c *Context) GetAllRespHeader() http.Header {
+	return c.Writer.Header()
+}
+
 // GetAllReqHeader 获取所有请求头部
 func (c *Context) GetAllReqHeader() http.Header {
 	return c.Request.Header
