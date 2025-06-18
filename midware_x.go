@@ -64,9 +64,13 @@ func (engine *Engine) UseIf(condition bool, middlewareX MiddlewareXFunc) Handler
 	// 如果中间件是无状态的，可以进行优化
 
 	// 优化：只创建一次
-	middleware := middlewareX()
 
 	return func(c *Context) {
-		middleware(c)
+		middleware := middlewareX()
+		if middleware != nil {
+			middleware(c)
+		} else {
+			c.Next()
+		}
 	}
 }
