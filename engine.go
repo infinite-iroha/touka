@@ -9,14 +9,30 @@ import (
 	"runtime"
 	"strings"
 
+	"html/template"
+	"io"
 	"net/http"
 	"path"
-
 	"sync"
 
 	"github.com/WJQSERVER-STUDIO/httpc"
 	"github.com/fenthope/reco"
 )
+
+// HTMLRender defines the interface for HTML rendering.
+type HTMLRender interface {
+	Render(writer io.Writer, name string, data interface{}, c *Context) error
+}
+
+// DefaultHTMLRenderer is a basic implementation of HTMLRender using html/template.
+type DefaultHTMLRenderer struct {
+	Templates *template.Template
+}
+
+// Render executes the template and writes to the writer.
+func (r *DefaultHTMLRenderer) Render(writer io.Writer, name string, data interface{}, c *Context) error {
+	return r.Templates.ExecuteTemplate(writer, name, data)
+}
 
 // Last 返回链中的最后一个处理函数
 // 如果链为空,则返回 nil
@@ -50,7 +66,7 @@ type Engine struct {
 
 	LogReco *reco.Logger
 
-	HTMLRender interface{} // 用于 HTML 模板渲染,可以设置为 *template.Template 或自定义渲染器接口
+	HTMLRender HTMLRender // 用于 HTML 模板渲染
 
 	routesInfo []RouteInfo // 存储所有注册的路由信息
 
@@ -218,6 +234,18 @@ func Default() *Engine {
 }
 
 // === 外部操作方法 ===
+
+// LoadHTMLGlob loads HTML templates from a glob pattern and sets them as the HTML renderer.
+func (engine *Engine) LoadHTMLGlob(pattern string) {
+	tpl := template.Must(template.ParseGlob(pattern))
+	engine.HTMLRender = &DefaultHTMLRenderer{Templates: tpl}
+}
+
+// SetHTMLTemplate sets a custom *template.Template as the HTML renderer.
+// This will wrap the *template.Template with the DefaultHTMLRenderer.
+func (engine *Engine) SetHTMLTemplate(tpl *template.Template) {
+	engine.HTMLRender = &DefaultHTMLRenderer{Templates: tpl}
+}
 
 // SetMaxRequestBodySize 设置读取Body的最大字节数
 func (engine *Engine) SetMaxRequestBodySize(size int64) {

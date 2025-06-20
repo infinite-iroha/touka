@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/xml" // Added for XML binding
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"math"
+	"mime" // Added for Content-Type parsing in ShouldBind
 	"net"
 	"net/http"
 	"net/netip"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/fenthope/reco"
 	"github.com/go-json-experiment/json"
+	"github.com/gorilla/schema" // Added for form binding
 
 	"github.com/WJQSERVER-STUDIO/go-utils/copyb"
 	"github.com/WJQSERVER-STUDIO/httpc"
@@ -298,21 +301,24 @@ func (c *Context) HTML(code int, name string, obj interface{}) {
 	c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	c.Writer.WriteHeader(code)
 
-	if c.engine != nil && c.engine.HTMLRender != nil {
-		// 假设 HTMLRender 是一个 *template.Template 实例
-		if tpl, ok := c.engine.HTMLRender.(*template.Template); ok {
-			err := tpl.ExecuteTemplate(c.Writer, name, obj)
-			if err != nil {
-				c.AddError(fmt.Errorf("failed to render HTML template '%s': %w", name, err))
-				//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to render HTML template")
-				c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to render HTML template '%s': %w", name, err))
-			}
-			return
+	if c.engine == nil || c.engine.HTMLRender == nil {
+		errMsg := "HTML renderer not configured"
+		if c.engine != nil && c.engine.LogReco != nil {
+			c.engine.LogReco.Error("[Context.HTML] HTMLRender not configured on engine")
+		} else {
+			// Fallback logging if LogReco is also nil, though unlikely if engine is not nil
+			// log.Println("[Context.HTML] HTMLRender not configured on engine")
 		}
-		// 可以扩展支持其他渲染器接口
+		c.ErrorUseHandle(http.StatusInternalServerError, errors.New(errMsg))
+		return
 	}
-	// 默认简单输出，用于未配置 HTMLRender 的情况
-	c.Writer.Write([]byte(fmt.Sprintf("<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj)))
+
+	err := c.engine.HTMLRender.Render(c.Writer, name, obj, c)
+	if err != nil {
+		renderErr := fmt.Errorf("failed to render HTML template '%s': %w", name, err)
+		c.AddError(renderErr)
+		c.ErrorUseHandle(http.StatusInternalServerError, renderErr)
+	}
 }
 
 // Redirect 执行 HTTP 重定向
@@ -356,21 +362,181 @@ func (c *Context) ShouldBindJSON(obj interface{}) error {
 	return nil
 }
 
+// ShouldBindXML 尝试将请求体中的 XML 数据绑定到 obj。
+func (c *Context) ShouldBindXML(obj interface{}) error {
+	if c.Request == nil || c.Request.Body == nil {
+		return errors.New("request body is empty for XML binding")
+	}
+	// defer c.Request.Body.Close() // Caller is responsible for closing the body
+
+	var reader io.Reader = c.Request.Body
+	if c.engine != nil && c.engine.MaxRequestBodySize > 0 {
+		if c.Request.ContentLength != -1 && c.Request.ContentLength > c.engine.MaxRequestBodySize {
+			return fmt.Errorf("request body size (%d bytes) exceeds XML binding limit (%d bytes)", c.Request.ContentLength, c.engine.MaxRequestBodySize)
+		}
+		reader = http.MaxBytesReader(nil, c.Request.Body, c.engine.MaxRequestBodySize)
+	}
+
+	decoder := xml.NewDecoder(reader)
+	if err := decoder.Decode(obj); err != nil {
+		// Check for MaxBytesError specifically
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return fmt.Errorf("request body size exceeds XML binding limit (%d bytes): %w", c.engine.MaxRequestBodySize, err)
+		}
+		return fmt.Errorf("xml binding error: %w", err)
+	}
+	return nil
+}
+
+// ShouldBindQuery 尝试将 URL 查询参数绑定到 obj。
+// 它使用 gorilla/schema 来执行绑定。
+func (c *Context) ShouldBindQuery(obj interface{}) error {
+	if c.Request == nil {
+		return errors.New("request is nil")
+	}
+
+	if c.queryCache == nil {
+		c.queryCache = c.Request.URL.Query()
+	}
+	values := c.queryCache
+
+	if len(values) == 0 {
+		// No query parameters to bind
+		return nil
+	}
+
+	decoder := schema.NewDecoder()
+	// decoder.IgnoreUnknownKeys(true) // Optional
+
+	if err := decoder.Decode(obj, values); err != nil {
+		return fmt.Errorf("query parameter binding error using schema: %w", err)
+	}
+
+	return nil
+}
+
 // ShouldBind 尝试将请求体绑定到各种类型（JSON, Form, XML 等）
-// 这是一个复杂的通用绑定接口，通常根据 Content-Type 或其他头部来判断绑定方式
-// 预留接口，可根据项目需求进行扩展
+// 根据请求的 Content-Type 自动选择合适的绑定器。
 func (c *Context) ShouldBind(obj interface{}) error {
-	// TODO: 完整的通用绑定逻辑
-	// 可以根据 c.Request.Header.Get("Content-Type") 来判断是 JSON, Form, XML 等
-	// 例如：
-	// contentType := c.Request.Header.Get("Content-Type")
-	// if strings.HasPrefix(contentType, "application/json") {
-	//     return c.ShouldBindJSON(obj)
-	// }
-	// if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") || strings.HasPrefix(contentType, "multipart/form-data") {
-	//     return c.ShouldBindForm(obj) // 需要实现 ShouldBindForm
-	// }
-	return errors.New("generic binding not fully implemented yet, implement based on Content-Type")
+	if c.Request == nil {
+		return errors.New("request is nil for binding")
+	}
+
+	// If there's no body, no binding from body can occur.
+	if c.Request.Body == nil || c.Request.Body == http.NoBody {
+		// Consider if query binding should be attempted for GET requests by default.
+		// For now, if no body, assume successful (empty) binding from body perspective.
+		return nil
+	}
+
+	contentType := c.ContentType() // This uses c.GetReqHeader("Content-Type")
+	if contentType == "" {
+		// If there is a body (ContentLength > 0 or chunked) but no Content-Type, this is an issue.
+		if c.Request.ContentLength > 0 || len(c.Request.TransferEncoding) > 0 {
+			return errors.New("missing Content-Type header for request body binding")
+		}
+		// If no Content-Type and no actual body content indicated, effectively no body to bind.
+		return nil
+	}
+
+	mimeType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return fmt.Errorf("error parsing Content-Type header '%s': %w", contentType, err)
+	}
+
+	switch mimeType {
+	case "application/json":
+		return c.ShouldBindJSON(obj)
+	case "application/xml", "text/xml":
+		return c.ShouldBindXML(obj)
+	case "application/x-www-form-urlencoded":
+		return c.ShouldBindForm(obj)
+	case "multipart/form-data":
+		return c.ShouldBindForm(obj) // ShouldBindForm handles multipart fields
+	default:
+		return fmt.Errorf("unsupported Content-Type for binding: %s", mimeType)
+	}
+}
+
+// ShouldBindForm 尝试将请求体中的表单数据绑定到 obj。
+// 它使用 gorilla/schema 来执行绑定。
+// 注意：此方法期望请求体是 application/x-www-form-urlencoded 或 multipart/form-data 类型。
+// 调用此方法前，应确保请求的 Content-Type 是合适的。
+func (c *Context) ShouldBindForm(obj interface{}) error {
+	if c.Request == nil {
+		return errors.New("request is nil")
+	}
+
+	// ParseMultipartForm populates c.Request.PostForm and c.Request.MultipartForm.
+	// defaultMemory is used to limit the size of memory used for storing file parts.
+	// If the form data exceeds this, it will be stored in temporary files.
+	// MaxBytesReader applied earlier (if any) would have limited the total body size.
+	if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
+		// Ignore "http: multipart handled by ParseMultipartForm" error, which means it was already parsed.
+		// This can happen if a middleware or previous ShouldBind call already parsed the form.
+		// Other errors (e.g., I/O errors during parsing) should be returned.
+		// Note: Gorilla schema might not need this if it directly uses r.Form or r.PostForm
+		// which are populated by ParseForm/ParseMultipartForm.
+		// For now, we ensure it's parsed. A more specific check might be needed if this causes issues.
+		// A common error to ignore here is `http.ErrNotMultipart` if the content type isn't multipart,
+		// as ParseMultipartForm expects that. ParseForm might be more general if we only expect
+		// x-www-form-urlencoded, but ParseMultipartForm handles both.
+		// Let's proceed and let schema decoder handle empty PostForm if parsing wasn't applicable.
+		// However, a direct "request body too large" from MaxBytesReader should have priority if it happened before.
+		// This specific error from ParseMultipartForm might relate to parts of a valid multipart form being too large for memory,
+		// not the overall request size.
+		// For simplicity in this step, we'll return the error unless it's a known "already parsed" scenario (which is not standard).
+		// A better approach for "already parsed" would be to check if c.Request.PostForm is already populated.
+		if c.formCache == nil && c.Request.PostForm == nil { // Attempt to parse only if not already cached or populated
+			if perr := c.Request.ParseMultipartForm(defaultMemory); perr != nil {
+				// http.ErrNotMultipart is returned if Content-Type is not multipart/form-data
+				// For x-www-form-urlencoded, ParseForm() is implicitly called by accessing PostForm
+				// Let's try to populate PostForm if it's not already
+				if c.Request.PostForm == nil {
+					if perr2 := c.Request.ParseForm(); perr2 != nil {
+						return fmt.Errorf("form parse error (ParseForm): %w", perr2)
+					}
+				}
+				// If it was not multipart and ParseForm also failed or PostForm is still nil,
+				// then we might have an issue. However, gorilla/schema works on `url.Values`
+				// which `c.Request.PostForm` provides.
+				// If `Content-Type` was not form-like, `PostForm` would be empty.
+			}
+		}
+		// If `c.formCache` is not nil, `PostForm()` would have already tried parsing.
+		// We will use `c.Request.PostForm` which gets populated by `ParseMultipartForm` or `ParseForm`.
+	}
+
+	// Initialize schema decoder
+	decoder := schema.NewDecoder()
+	// decoder.IgnoreUnknownKeys(true) // Optional: if you want to ignore fields in form not in struct
+
+	// Get form values. c.Request.PostForm includes values from both
+	// application/x-www-form-urlencoded and multipart/form-data bodies.
+	// It needs to be called after ParseMultipartForm or ParseForm.
+	// Accessing c.Request.PostForm itself can trigger ParseForm if not already parsed and content type is x-www-form-urlencoded.
+	if err := c.Request.ParseForm(); err != nil && c.Request.PostForm == nil {
+		 // If ParseForm itself errors and PostForm is still nil, then return error.
+		 // This ensures that for x-www-form-urlencoded, parsing is attempted.
+		 // ParseMultipartForm handles multipart, and its error is handled above.
+		return fmt.Errorf("form parse error (PostForm init): %w", err)
+	}
+
+	values := c.Request.PostForm
+	if len(values) == 0 {
+		// If PostForm is empty, there's nothing to bind from the POST body.
+		// This is not necessarily an error for schema.Decode, it will just bind zero values.
+		// Depending on requirements, one might want to return an error here if binding is mandatory.
+		// For now, we let schema.Decode handle it (it will likely do nothing or bind zero values).
+	}
+
+	// Decode the form values into the object
+	if err := decoder.Decode(obj, values); err != nil {
+		return fmt.Errorf("form binding error using schema: %w", err)
+	}
+
+	return nil
 }
 
 // AddError 添加一个错误到 Context
