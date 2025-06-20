@@ -330,14 +330,27 @@ func (c *Context) ShouldBindJSON(obj interface{}) error {
 	if c.Request.Body == nil {
 		return errors.New("request body is empty")
 	}
-	/*
-		decoder := json.NewDecoder(c.Request.Body)
-		if err := decoder.Decode(obj); err != nil {
-			return fmt.Errorf("json binding error: %w", err)
+	// defer c.Request.Body.Close() // 通常由调用方或中间件确保关闭，但如果这里是唯一消耗点，可以考虑
+
+	var reader io.Reader = c.Request.Body
+	if c.engine != nil && c.engine.MaxRequestBodySize > 0 {
+		if c.Request.ContentLength != -1 && c.Request.ContentLength > c.engine.MaxRequestBodySize {
+			return fmt.Errorf("request body size (%d bytes) exceeds configured limit (%d bytes)", c.Request.ContentLength, c.engine.MaxRequestBodySize)
 		}
-	*/
-	err := json.UnmarshalRead(c.Request.Body, obj)
+		// 注意：http.MaxBytesReader(nil, ...) 中的 nil ResponseWriter 参数意味着当超出限制时，
+		// MaxBytesReader 会直接返回错误，而不会尝试写入 HTTP 错误响应。这对于 API 来说是合适的。
+		reader = http.MaxBytesReader(nil, c.Request.Body, c.engine.MaxRequestBodySize)
+	}
+
+	err := json.UnmarshalRead(reader, obj)
 	if err != nil {
+		// 检查错误类型是否为 http.MaxBytesError
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return fmt.Errorf("request body size exceeds configured limit (%d bytes): %w", c.engine.MaxRequestBodySize, err)
+		}
+		// 检查是否是 json 相关的错误，可能需要更细致的错误处理
+		// 例如，json.SyntaxError, json.UnmarshalTypeError 等
 		return fmt.Errorf("json binding error: %w", err)
 	}
 	return nil
@@ -441,13 +454,31 @@ func (c *Context) GetReqBody() io.ReadCloser {
 // 注意：请求体只能读取一次
 func (c *Context) GetReqBodyFull() ([]byte, error) {
 	if c.Request.Body == nil {
-		return nil, nil
+		return nil, nil // 或者返回一个错误: errors.New("request body is nil")
 	}
 	defer c.Request.Body.Close() // 确保请求体被关闭
-	data, err := io.ReadAll(c.Request.Body)
+
+	var reader io.Reader = c.Request.Body
+	if c.engine != nil && c.engine.MaxRequestBodySize > 0 {
+		if c.Request.ContentLength != -1 && c.Request.ContentLength > c.engine.MaxRequestBodySize {
+			err := fmt.Errorf("request body size (%d bytes) exceeds configured limit (%d bytes)", c.Request.ContentLength, c.engine.MaxRequestBodySize)
+			c.AddError(err)
+			return nil, err
+		}
+		reader = http.MaxBytesReader(nil, c.Request.Body, c.engine.MaxRequestBodySize)
+	}
+
+	data, err := io.ReadAll(reader)
 	if err != nil {
-		c.AddError(fmt.Errorf("failed to read request body: %w", err))
-		return nil, fmt.Errorf("failed to read request body: %w", err)
+		// 检查错误类型是否为 http.MaxBytesError，如果是，则表示超出了限制
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			err = fmt.Errorf("request body size exceeds configured limit (%d bytes): %w", c.engine.MaxRequestBodySize, err)
+		} else {
+			err = fmt.Errorf("failed to read request body: %w", err)
+		}
+		c.AddError(err)
+		return nil, err
 	}
 	return data, nil
 }
@@ -455,13 +486,30 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 // 类似 GetReqBodyFull, 返回 *bytes.Buffer
 func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
 	if c.Request.Body == nil {
-		return nil, nil
+		return nil, nil // 或者返回一个错误: errors.New("request body is nil")
 	}
 	defer c.Request.Body.Close() // 确保请求体被关闭
-	data, err := io.ReadAll(c.Request.Body)
+
+	var reader io.Reader = c.Request.Body
+	if c.engine != nil && c.engine.MaxRequestBodySize > 0 {
+		if c.Request.ContentLength != -1 && c.Request.ContentLength > c.engine.MaxRequestBodySize {
+			err := fmt.Errorf("request body size (%d bytes) exceeds configured limit (%d bytes)", c.Request.ContentLength, c.engine.MaxRequestBodySize)
+			c.AddError(err)
+			return nil, err
+		}
+		reader = http.MaxBytesReader(nil, c.Request.Body, c.engine.MaxRequestBodySize)
+	}
+
+	data, err := io.ReadAll(reader)
 	if err != nil {
-		c.AddError(fmt.Errorf("failed to read request body: %w", err))
-		return nil, fmt.Errorf("failed to read request body: %w", err)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			err = fmt.Errorf("request body size exceeds configured limit (%d bytes): %w", c.engine.MaxRequestBodySize, err)
+		} else {
+			err = fmt.Errorf("failed to read request body: %w", err)
+		}
+		c.AddError(err)
+		return nil, err
 	}
 	return bytes.NewBuffer(data), nil
 }
