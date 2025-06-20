@@ -9,14 +9,30 @@ import (
 	"runtime"
 	"strings"
 
+	"html/template"
+	"io"
 	"net/http"
 	"path"
-
 	"sync"
 
 	"github.com/WJQSERVER-STUDIO/httpc"
 	"github.com/fenthope/reco"
 )
+
+// HTMLRender defines the interface for HTML rendering.
+type HTMLRender interface {
+	Render(writer io.Writer, name string, data interface{}, c *Context) error
+}
+
+// DefaultHTMLRenderer is a basic implementation of HTMLRender using html/template.
+type DefaultHTMLRenderer struct {
+	Templates *template.Template
+}
+
+// Render executes the template and writes to the writer.
+func (r *DefaultHTMLRenderer) Render(writer io.Writer, name string, data interface{}, c *Context) error {
+	return r.Templates.ExecuteTemplate(writer, name, data)
+}
 
 // Last 返回链中的最后一个处理函数
 // 如果链为空,则返回 nil
@@ -50,7 +66,7 @@ type Engine struct {
 
 	LogReco *reco.Logger
 
-	HTMLRender interface{} // 用于 HTML 模板渲染,可以设置为 *template.Template 或自定义渲染器接口
+	HTMLRender HTMLRender // 用于 HTML 模板渲染
 
 	routesInfo []RouteInfo // 存储所有注册的路由信息
 
@@ -74,6 +90,8 @@ type Engine struct {
 	// 如果设置了此回调,它将优先于 ServerConfigurator 被用于 HTTPS 服务器
 	// 如果未设置,HTTPS 服务器将回退使用 ServerConfigurator (如果已设置)
 	TLSServerConfigurator func(*http.Server)
+
+	MaxRequestBodySize int64 // 限制读取Body的最大字节数
 }
 
 type ErrorHandle struct {
@@ -87,12 +105,39 @@ type ErrorHandler func(c *Context, code int, err error)
 func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是否已断开连接
 	select {
 	case <-c.Request.Context().Done():
-
+		// 客户端断开连接,无需进一步处理
 		return
 	default:
+		// 检查响应是否已经写入
 		if c.Writer.Written() {
 			return
 		}
+
+		// 收集错误信息用于日志记录
+		primaryErrStr := "none"
+		if err != nil {
+			primaryErrStr = err.Error()
+		}
+
+		var collectedErrors []string
+		for _, e := range c.GetErrors() {
+			collectedErrors = append(collectedErrors, e.Error())
+		}
+		collectedErrorsStr := strings.Join(collectedErrors, "; ")
+		if collectedErrorsStr == "" {
+			collectedErrorsStr = "none"
+		}
+
+		// 记录错误日志
+		logMessage := fmt.Sprintf("[Touka ErrorHandler] Request: [%s] %s | Primary Error: %s | Collected Errors: %s",
+			c.Request.Method, c.Request.URL.Path, primaryErrStr, collectedErrorsStr)
+
+		if c.engine != nil && c.engine.LogReco != nil {
+			c.engine.LogReco.Error(logMessage)
+		} else {
+			log.Println(logMessage) // Fallback to standard logger
+		}
+
 		// 输出json 状态码与状态码对应描述
 		var errMsg string
 		if err != nil {
@@ -160,6 +205,7 @@ func New() *Engine {
 		noRoutes:              make(HandlersChain, 0),
 		ServerConfigurator:    nil,
 		TLSServerConfigurator: nil,
+		MaxRequestBodySize:    10 * 1024 * 1024, // 默认 10MB
 	}
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
@@ -188,6 +234,23 @@ func Default() *Engine {
 }
 
 // === 外部操作方法 ===
+
+// LoadHTMLGlob loads HTML templates from a glob pattern and sets them as the HTML renderer.
+func (engine *Engine) LoadHTMLGlob(pattern string) {
+	tpl := template.Must(template.ParseGlob(pattern))
+	engine.HTMLRender = &DefaultHTMLRenderer{Templates: tpl}
+}
+
+// SetHTMLTemplate sets a custom *template.Template as the HTML renderer.
+// This will wrap the *template.Template with the DefaultHTMLRenderer.
+func (engine *Engine) SetHTMLTemplate(tpl *template.Template) {
+	engine.HTMLRender = &DefaultHTMLRenderer{Templates: tpl}
+}
+
+// SetMaxRequestBodySize 设置读取Body的最大字节数
+func (engine *Engine) SetMaxRequestBodySize(size int64) {
+	engine.MaxRequestBodySize = size
+}
 
 // SetServerConfigurator 设置一个函数,该函数将在任何 HTTP 或 HTTPS 服务器
 // (通过 RunShutdown, RunTLS, RunTLSRedir) 启动前被调用,

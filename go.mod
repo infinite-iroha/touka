@@ -9,4 +9,7 @@ require (
 	github.com/go-json-experiment/json v0.0.0-20250517221953-25912455fbc8
 )
 
-require github.com/valyala/bytebufferpool v1.0.0 // indirect
+require (
+	github.com/gorilla/schema v1.4.1 // indirect
+	github.com/valyala/bytebufferpool v1.0.0 // indirect
+)
