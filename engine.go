@@ -202,6 +202,21 @@ func (engine *Engine) SetTLSServerConfigurator(fn func(*http.Server)) {
 	engine.TLSServerConfigurator = fn
 }
 
+// 是否开启末尾slash重定向
+func (engine *Engine) SetRedirectTrailingSlash(enable bool) {
+	engine.RedirectTrailingSlash = enable
+}
+
+// 是否开启固定路径重定向
+func (engine *Engine) SetRedirectFixedPath(enable bool) {
+	engine.RedirectFixedPath = enable
+}
+
+// 是否开启MethodNotAllowed
+func (engine *Engine) SetHandleMethodNotAllowed(enable bool) {
+	engine.HandleMethodNotAllowed = enable
+}
+
 // SetLogger传入实例
 func (engine *Engine) SetLogger(logger *reco.Logger) {
 	engine.LogReco = logger
@@ -932,6 +947,34 @@ func (group *RouterGroup) StaticFile(relativePath, filePath string) {
 	group.GET(relativePath, FileHandle)
 	group.HEAD(relativePath, FileHandle)
 	group.OPTIONS(relativePath, FileHandle)
+}
+
+// StaticFS
+func (engine *Engine) StaticFS(relativePath string, fs http.FileSystem) {
+	// 清理路径
+	relativePath = path.Clean(relativePath)
+
+	// 确保相对路径以 '/' 结尾,以便 FileServer 正确处理子路径
+	if !strings.HasSuffix(relativePath, "/") {
+		relativePath += "/"
+	}
+
+	// 注册一个捕获所有路径的路由,使用 FileServer 处理器
+	engine.ANY(relativePath+"*filepath", FileServer(fs))
+}
+
+// Group的StaticFS
+func (group *RouterGroup) StaticFS(relativePath string, fs http.FileSystem) {
+	// 清理路径
+	relativePath = path.Clean(relativePath)
+
+	// 确保相对路径以 '/' 结尾,以便 FileServer 正确处理子路径
+	if !strings.HasSuffix(relativePath, "/") {
+		relativePath += "/"
+	}
+
+	// 注册一个捕获所有路径的路由,使用 FileServer 处理器
+	group.ANY(relativePath+"*filepath", FileServer(fs))
 }
 
 // 维护一个Methods列表
