@@ -121,6 +121,21 @@ func defaultErrorWarp(handler ErrorHandler) ErrorHandler {
 				return
 			}
 		}
+		// 查看context内有没有收集到error
+		if len(c.Errors) > 0 {
+			c.Errorf("errpage: context errors: %v, current error: %v", errors.Join(c.Errors...), err)
+			if err == nil {
+				err = errors.Join(c.Errors...)
+			}
+		}
+		// 如果客户端已经断开连接，则不尝试写入响应
+		// 避免在客户端已关闭连接后写入响应导致的问题
+		// 检查 context.Context 是否已取消
+		if errors.Is(c.Request.Context().Err(), context.Canceled) {
+			log.Printf("errpage: client disconnected, skipping error page rendering for status %d, err: %v", code, err)
+			return
+		}
+
 		handler(c, code, err)
 	}
 }
