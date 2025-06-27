@@ -194,6 +194,8 @@ Recovery `r.Use(touka.Recovery())`
 *   **API 文档：** 访问 [pkg.go.dev/github.com/infinite-iroha/touka](https://pkg.go.dev/github.com/infinite-iroha/touka) 查看完整的 API 参考
 *   **贡献：** 我们欢迎任何形式的贡献，无论是错误报告、功能建议还是代码提交。请遵循项目的贡献指南
 
+*   [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/infinite-iroha/touka) 可供参考, AI生成存在幻觉, 不完全可靠, 请注意辨别
+
 ## 相关项目
 
 [gin](https://github.com/gin-gonic/gin) 参考并引用了相关部分代码
