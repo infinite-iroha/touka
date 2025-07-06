@@ -267,15 +267,11 @@ func (c *Context) String(code int, format string, values ...interface{}) {
 func (c *Context) JSON(code int, obj interface{}) {
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	// JSON 编码
-	jsonBytes, err := json.Marshal(obj)
-	if err != nil {
+	if err := json.MarshalWrite(c.Writer, obj); err != nil {
 		c.AddError(fmt.Errorf("failed to marshal JSON: %w", err))
-		//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to marshal JSON")
 		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to marshal JSON: %w", err))
 		return
 	}
-	c.Writer.Write(jsonBytes)
 }
 
 // GOB 向响应写入GOB数据
@@ -287,7 +283,6 @@ func (c *Context) GOB(code int, obj interface{}) {
 	encoder := gob.NewEncoder(c.Writer)
 	if err := encoder.Encode(obj); err != nil {
 		c.AddError(fmt.Errorf("failed to encode GOB: %w", err))
-		//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to encode GOB")
 		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode GOB: %w", err))
 		return
 	}
@@ -307,7 +302,6 @@ func (c *Context) HTML(code int, name string, obj interface{}) {
 			err := tpl.ExecuteTemplate(c.Writer, name, obj)
 			if err != nil {
 				c.AddError(fmt.Errorf("failed to render HTML template '%s': %w", name, err))
-				//c.String(http.StatusInternalServerError, "Internal Server Error: Failed to render HTML template")
 				c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to render HTML template '%s': %w", name, err))
 			}
 			return
@@ -333,12 +327,6 @@ func (c *Context) ShouldBindJSON(obj interface{}) error {
 	if c.Request.Body == nil {
 		return errors.New("request body is empty")
 	}
-	/*
-		decoder := json.NewDecoder(c.Request.Body)
-		if err := decoder.Decode(obj); err != nil {
-			return fmt.Errorf("json binding error: %w", err)
-		}
-	*/
 	err := json.UnmarshalRead(c.Request.Body, obj)
 	if err != nil {
 		return fmt.Errorf("json binding error: %w", err)
@@ -447,7 +435,7 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 		return nil, nil
 	}
 	defer c.Request.Body.Close() // 确保请求体被关闭
-	data, err := io.ReadAll(c.Request.Body)
+	data, err := copyb.ReadAll(c.Request.Body)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -461,7 +449,7 @@ func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
 		return nil, nil
 	}
 	defer c.Request.Body.Close() // 确保请求体被关闭
-	data, err := io.ReadAll(c.Request.Body)
+	data, err := copyb.ReadAll(c.Request.Body)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)

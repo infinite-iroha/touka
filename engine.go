@@ -554,7 +554,6 @@ func NotFound() HandlerFunc {
 	return func(c *Context) {
 		engine := c.engine
 		engine.errorHandle.handler(c, http.StatusNotFound, errors.New("not found"))
-		return
 	}
 }
 
