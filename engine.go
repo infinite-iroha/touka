@@ -281,22 +281,6 @@ func (engine *Engine) GetDefaultErrHandler() ErrorHandler {
 	return defaultErrorHandle
 }
 
-/*
-// 传入并配置unMatchFS
-func (engine *Engine) SetUnMatchFS(fs http.FileSystem) {
-	if fs != nil {
-		engine.unMatchFS.FSForUnmatched = fs
-		engine.unMatchFS.ServeUnmatchedAsFS = true
-		engine.unMatchFileServer = GetStaticFSHandleFunc(http.FileServer(fs))
-		engine.UnMatchFSRoutes = HandlersChain{engine.unMatchFileServer}
-	} else {
-		engine.unMatchFS.ServeUnmatchedAsFS = false
-		engine.unMatchFileServer = nil
-		engine.UnMatchFSRoutes = nil
-	}
-}
-*/
-
 func (engine *Engine) SetUnMatchFS(fs http.FileSystem, handlers ...HandlerFunc) {
 	engine.SetUnMatchFSChain(fs, handlers...)
 }
@@ -309,6 +293,7 @@ func (engine *Engine) SetUnMatchFSChain(fs http.FileSystem, handlers ...HandlerF
 		combinedChain := make(HandlersChain, len(handlers)+1)
 		copy(combinedChain, handlers)
 		combinedChain[len(handlers)] = unMatchFileServer
+		engine.UnMatchFSRoutes = combinedChain
 	} else {
 		engine.unMatchFS.ServeUnmatchedAsFS = false
 		engine.UnMatchFSRoutes = nil
