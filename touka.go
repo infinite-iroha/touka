@@ -42,3 +42,28 @@ type RouteInfo struct {
 	Handler string // 处理函数名称
 	Group   string // 路由分组
 }
+
+// 维护一个Methods列表
+var (
+	MethodGet     = "GET"
+	MethodHead    = "HEAD"
+	MethodPost    = "POST"
+	MethodPut     = "PUT"
+	MethodPatch   = "PATCH"
+	MethodDelete  = "DELETE"
+	MethodConnect = "CONNECT"
+	MethodOptions = "OPTIONS"
+	MethodTrace   = "TRACE"
+)
+
+var MethodsSet = map[string]struct{}{
+	MethodGet:     {},
+	MethodHead:    {},
+	MethodPost:    {},
+	MethodPut:     {},
+	MethodPatch:   {},
+	MethodDelete:  {},
+	MethodConnect: {},
+	MethodOptions: {},
+	MethodTrace:   {},
+}

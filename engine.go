@@ -3,14 +3,12 @@ package touka
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"reflect"
 	"runtime"
 	"strings"
 
 	"net/http"
-	"path"
 
 	"sync"
 
@@ -59,8 +57,8 @@ type Engine struct {
 	noRoute  HandlerFunc   // NoRoute 处理器
 	noRoutes HandlersChain // NoRoutes 处理器链 (如果 noRoute 未设置,则使用此链)
 
-	unMatchFS         UnMatchFS    // 未匹配下的处理
-	unMatchFileServer http.Handler // 处理handle
+	unMatchFS       UnMatchFS     // 未匹配下的处理
+	UnMatchFSRoutes HandlersChain // UnMatch 处理器链, 用于扩展自由度, 在此局部链上, unMatchFS相关处理会在最后
 
 	serverProtocols     *http.Protocols //服务协议
 	Protocols           ProtocolsConfig //协议版本配置
@@ -77,6 +75,32 @@ type Engine struct {
 
 	// GlobalMaxRequestBodySize 全局请求体Body大小限制
 	GlobalMaxRequestBodySize int64
+}
+
+// HandleFunc 注册一个或多个 HTTP 方法的路由
+// methods 参数是一个字符串切片,包含要注册的 HTTP 方法（例如 []string{"GET", "POST"}）
+// relativePath 是相对于当前组或 Engine 的路径
+// handlers 是处理函数链
+func (engine *Engine) HandleFunc(methods []string, relativePath string, handlers ...HandlerFunc) {
+	for _, method := range methods {
+		if _, ok := MethodsSet[method]; !ok {
+			panic("invalid method: " + method)
+		}
+		engine.Handle(method, relativePath, handlers...)
+	}
+}
+
+// HandleFunc 注册一个或多个 HTTP 方法的路由
+// methods 参数是一个字符串切片,包含要注册的 HTTP 方法（例如 []string{"GET", "POST"}）
+// relativePath 是相对于当前组或 Engine 的路径
+// handlers 是处理函数链
+func (group *RouterGroup) HandleFunc(methods []string, relativePath string, handlers ...HandlerFunc) {
+	for _, method := range methods {
+		if _, ok := MethodsSet[method]; !ok {
+			panic("invalid method: " + method)
+		}
+		group.Handle(method, relativePath, handlers...)
+	}
 }
 
 type ErrorHandle struct {
@@ -257,15 +281,22 @@ func (engine *Engine) GetDefaultErrHandler() ErrorHandler {
 	return defaultErrorHandle
 }
 
-// 传入并配置unMatchFS
-func (engine *Engine) SetUnMatchFS(fs http.FileSystem) {
+func (engine *Engine) SetUnMatchFS(fs http.FileSystem, handlers ...HandlerFunc) {
+	engine.SetUnMatchFSChain(fs, handlers...)
+}
+
+func (engine *Engine) SetUnMatchFSChain(fs http.FileSystem, handlers ...HandlerFunc) {
 	if fs != nil {
 		engine.unMatchFS.FSForUnmatched = fs
 		engine.unMatchFS.ServeUnmatchedAsFS = true
-		engine.unMatchFileServer = http.FileServer(fs)
+		unMatchFileServer := GetStaticFSHandleFunc(http.FileServer(fs))
+		combinedChain := make(HandlersChain, len(handlers)+1)
+		copy(combinedChain, handlers)
+		combinedChain[len(handlers)] = unMatchFileServer
+		engine.UnMatchFSRoutes = combinedChain
 	} else {
 		engine.unMatchFS.ServeUnmatchedAsFS = false
-		engine.unMatchFileServer = nil
+		engine.UnMatchFSRoutes = nil
 	}
 }
 
@@ -385,135 +416,6 @@ func getHandlerName(h HandlerFunc) string {
 	f := runtime.FuncForPC(pc)
 	return f.Name() // 返回例如 "main.HomeHandler" 或 "touka.Logger"
 
-}
-
-// ServeHTTP 实现了 http.Handler 接口,是 Engine 处理所有 HTTP 请求的入口
-// 每个传入的 HTTP 请求都会调用此方法
-func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// 从 Context Pool 中获取一个 Context 对象进行复用
-	c := engine.pool.Get().(*Context)
-	c.reset(w, req) // 重置 Context 对象的状态以适应当前请求
-
-	// 执行请求处理
-	engine.handleRequest(c)
-
-	// 将 Context 对象放回 Context Pool,以供下次复用
-	engine.pool.Put(c)
-}
-
-// handleRequest 负责根据请求查找路由并执行相应的处理函数链
-// 这是路由查找和执行的核心逻辑
-func (engine *Engine) handleRequest(c *Context) {
-	httpMethod := c.Request.Method
-	requestPath := c.Request.URL.Path
-
-	// 查找对应的路由树的根节点
-	rootNode := engine.methodTrees.get(httpMethod) // 这里获取到的 rootNode 已经是 *node 类型
-	if rootNode != nil {
-		// 查找匹配的节点和处理函数
-		// 这里传递 &c.Params 而不是重新创建,以利用 Context 中预分配的容量
-		// skippedNodes 内部使用,因此无需从外部传入已分配的 slice
-		var skippedNodes []skippedNode // 用于回溯的跳过节点
-		// 直接在 rootNode 上调用 getValue 方法
-		value := rootNode.getValue(requestPath, &c.Params, &skippedNodes, true) // unescape=true 对路径参数进行 URL 解码
-
-		if value.handlers != nil {
-			//c.handlers = engine.combineHandlers(engine.globalHandlers, value.handlers) // 组合全局中间件和路由处理函数
-			c.handlers = value.handlers
-			c.Next() // 执行处理函数链
-			//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
-			return
-		}
-
-		// 如果没有找到处理函数,检查是否需要重定向（尾部斜杠或大小写修复）
-		if httpMethod != http.MethodConnect && requestPath != "/" { // CONNECT 方法和根路径不进行重定向
-			if value.tsr && engine.RedirectTrailingSlash {
-				// 尾部斜杠重定向：/foo/ -> /foo 或 /foo -> /foo/
-				redirectPath := requestPath
-				if len(requestPath) > 0 && requestPath[len(requestPath)-1] == '/' {
-					redirectPath = requestPath[:len(requestPath)-1]
-				} else {
-					redirectPath = requestPath + "/"
-				}
-				c.Redirect(http.StatusMovedPermanently, redirectPath) // 301 永久重定向
-				return
-			}
-			// 尝试不区分大小写的查找
-			// 直接在 rootNode 上调用 findCaseInsensitivePath 方法
-			ciPath, found := rootNode.findCaseInsensitivePath(requestPath, engine.RedirectTrailingSlash)
-			if found && engine.RedirectFixedPath {
-				c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
-				return
-			}
-		}
-	}
-
-	// 构建处理链
-	// 组合全局中间件和路由处理函数
-	handlers := engine.globalHandlers
-
-	// 如果启用了 MethodNotAllowed 处理,并且没有找到精确匹配的路由
-	// 则在全局中间件之后添加 MethodNotAllowed 处理器
-	if engine.HandleMethodNotAllowed {
-		handlers = append(handlers, MethodNotAllowed())
-	}
-
-	// 如果启用了 UnMatchFS 处理,并且没有找到精确匹配的路由和 MethodNotAllowed
-	// 则在处理链的最后添加 UnMatchFS 处理器
-	if engine.unMatchFS.ServeUnmatchedAsFS {
-		handlers = append(handlers, unMatchFSHandle())
-	}
-
-	// 如果用户设置了 NoRoute 处理器,且没有匹配到任何路由、MethodNotAllowed 或 UnMatchFS
-	// 则在处理链的最后添加 NoRoute 处理器
-	if engine.noRoute != nil {
-		handlers = append(handlers, engine.noRoute)
-	} else if len(engine.noRoutes) > 0 {
-		handlers = append(handlers, engine.noRoutes...)
-	}
-
-	handlers = append(handlers, NotFound())
-
-	c.handlers = handlers
-	c.Next() // 执行处理函数链
-	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
-}
-
-// UnMatchFS HandleFunc
-func unMatchFSHandle() HandlerFunc {
-	return func(c *Context) {
-		engine := c.engine
-		// 确保 engine.unMatchFileServer 存在
-		if !engine.unMatchFS.ServeUnmatchedAsFS || engine.unMatchFileServer == nil {
-			c.Next() // 如果未配置或 FileSystem 为 nil,则继续处理链
-			return
-		}
-		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
-			// 使用 http.FileServer 处理未匹配的请求
-			ecw := AcquireErrorCapturingResponseWriter(c)
-			defer ReleaseErrorCapturingResponseWriter(ecw)
-			c.engine.unMatchFileServer.ServeHTTP(ecw, c.Request)
-			ecw.processAfterFileServer()
-			c.Abort()
-			return
-		} else {
-			if engine.noRoute == nil {
-				// 若为OPTIONS
-				if c.Request.Method == http.MethodOptions {
-					//返回allow get
-					c.Writer.Header().Set("Allow", "GET")
-					c.Status(http.StatusOK)
-					c.Abort()
-					return
-				} else {
-					engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-					return
-				}
-			} else {
-				c.Next()
-			}
-		}
-	}
 }
 
 // 405中间件
@@ -730,353 +632,98 @@ func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) IR
 	}
 }
 
-// == 其他操作方式 ===
+// ServeHTTP 实现了 http.Handler 接口,是 Engine 处理所有 HTTP 请求的入口
+// 每个传入的 HTTP 请求都会调用此方法
+func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// 从 Context Pool 中获取一个 Context 对象进行复用
+	c := engine.pool.Get().(*Context)
+	c.reset(w, req) // 重置 Context 对象的状态以适应当前请求
 
-// StaticDir 传入一个文件夹路径, 使用FileServer进行处理
-// r.StaticDir("/test/*filepath", "/var/www/test")
-func (engine *Engine) StaticDir(relativePath, rootPath string) {
-	// 清理路径
-	relativePath = path.Clean(relativePath)
-	rootPath = path.Clean(rootPath)
+	// 执行请求处理
+	engine.handleRequest(c)
 
-	// 确保相对路径以 '/' 结尾,以便 FileServer 正确处理子路径
-	if !strings.HasSuffix(relativePath, "/") {
-		relativePath += "/"
-	}
+	// 将 Context 对象放回 Context Pool,以供下次复用
+	engine.pool.Put(c)
+}
 
-	// 创建一个文件系统处理器
-	fileServer := http.FileServer(http.Dir(rootPath))
+// handleRequest 负责根据请求查找路由并执行相应的处理函数链
+// 这是路由查找和执行的核心逻辑
+func (engine *Engine) handleRequest(c *Context) {
+	httpMethod := c.Request.Method
+	requestPath := c.Request.URL.Path
 
-	// 注册一个捕获所有路径的路由,使用自定义处理器
-	// 注意：这里使用 ANY 方法,但 FileServer 通常只处理 GET 和 HEAD
-	// 我们可以通过在处理函数内部检查方法来限制
-	engine.ANY(relativePath+"*filepath", func(c *Context) {
-		// 检查是否是 GET 或 HEAD 方法
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			// 如果不是,且启用了 MethodNotAllowed 处理,则继续到 MethodNotAllowed 中间件
-			if engine.HandleMethodNotAllowed {
-				c.Next()
-			} else {
-				// 否则,返回 405 Method Not Allowed
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-			}
+	// 查找对应的路由树的根节点
+	rootNode := engine.methodTrees.get(httpMethod) // 这里获取到的 rootNode 已经是 *node 类型
+	if rootNode != nil {
+		// 查找匹配的节点和处理函数
+		// 这里传递 &c.Params 而不是重新创建,以利用 Context 中预分配的容量
+		// skippedNodes 内部使用,因此无需从外部传入已分配的 slice
+		var skippedNodes []skippedNode // 用于回溯的跳过节点
+		// 直接在 rootNode 上调用 getValue 方法
+		value := rootNode.getValue(requestPath, &c.Params, &skippedNodes, true) // unescape=true 对路径参数进行 URL 解码
+
+		if value.handlers != nil {
+			//c.handlers = engine.combineHandlers(engine.globalHandlers, value.handlers) // 组合全局中间件和路由处理函数
+			c.handlers = value.handlers
+			c.Next() // 执行处理函数链
+			//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 			return
 		}
 
-		requestPath := c.Request.URL.Path
-
-		// 获取捕获到的文件路径参数
-		filepath := c.Param("filepath")
-
-		// 构造文件服务器需要处理的请求路径
-		// FileServer 会将请求路径与 http.Dir 的根路径结合
-		// 我们需要移除相对路径前缀,只保留文件路径部分
-		// 例如,如果 relativePath 是 "/static/",请求是 "/static/js/app.js"
-		// FileServer 需要的路径是 "/js/app.js"
-		// 这里的 filepath 参数已经包含了 "/" 前缀,例如 "/js/app.js"
-		// 所以直接使用 filepath 即可
-		c.Request.URL.Path = filepath
-
-		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
-		// 这样我们可以在 FileServer 返回 404 或 403 时,使用 Engine 的 ErrorHandler 进行统一处理
-		ecw := AcquireErrorCapturingResponseWriter(c)
-		defer ReleaseErrorCapturingResponseWriter(ecw)
-
-		//
-		// 调用 FileServer 处理请求
-		fileServer.ServeHTTP(ecw, c.Request)
-
-		// 在 FileServer 处理完成后,检查是否捕获到错误状态码,并调用 ErrorHandler
-		ecw.processAfterFileServer()
-
-		// 恢复原始请求路径,以便后续中间件或日志记录使用
-		c.Request.URL.Path = requestPath
-
-		// 中止处理链,因为 FileServer 已经处理了响应
-		c.Abort()
-	})
-}
-
-// Group的StaticDir方式
-func (group *RouterGroup) StaticDir(relativePath, rootPath string) {
-	// 清理路径
-	relativePath = path.Clean(relativePath)
-	rootPath = path.Clean(rootPath)
-
-	// 确保相对路径以 '/' 结尾,以便 FileServer 正确处理子路径
-	if !strings.HasSuffix(relativePath, "/") {
-		relativePath += "/"
-	}
-
-	// 创建一个文件系统处理器
-	fileServer := http.FileServer(http.Dir(rootPath))
-
-	// 注册一个捕获所有路径的路由,使用自定义处理器
-	// 注意：这里使用 ANY 方法,但 FileServer 通常只处理 GET 和 HEAD
-	// 我们可以通过在处理函数内部检查方法来限制
-	group.ANY(relativePath+"*filepath", func(c *Context) {
-		// 检查是否是 GET 或 HEAD 方法
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			// 如果不是,且启用了 MethodNotAllowed 处理,则继续到 MethodNotAllowed 中间件
-			if group.engine.HandleMethodNotAllowed {
-				c.Next()
-			} else {
-				// 否则,返回 405 Method Not Allowed
-				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		// 如果没有找到处理函数,检查是否需要重定向（尾部斜杠或大小写修复）
+		if httpMethod != http.MethodConnect && requestPath != "/" { // CONNECT 方法和根路径不进行重定向
+			if value.tsr && engine.RedirectTrailingSlash {
+				// 尾部斜杠重定向：/foo/ -> /foo 或 /foo -> /foo/
+				redirectPath := requestPath
+				if len(requestPath) > 0 && requestPath[len(requestPath)-1] == '/' {
+					redirectPath = requestPath[:len(requestPath)-1]
+				} else {
+					redirectPath = requestPath + "/"
+				}
+				c.Redirect(http.StatusMovedPermanently, redirectPath) // 301 永久重定向
+				return
 			}
-			return
-		}
-
-		requestPath := c.Request.URL.Path
-
-		// 获取捕获到的文件路径参数
-		filepath := c.Param("filepath")
-
-		// 构造文件服务器需要处理的请求路径
-		// FileServer 会将请求路径与 http.Dir 的根路径结合
-		// 我们需要移除相对路径前缀,只保留文件路径部分
-		// 例如,如果 relativePath 是 "/static/",请求是 "/static/js/app.js"
-		// FileServer 需要的路径是 "/js/app.js"
-		// 这里的 filepath 参数已经包含了 "/" 前缀,例如 "/js/app.js"
-		// 所以直接使用 filepath 即可
-		c.Request.URL.Path = filepath
-
-		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
-		// 这样我们可以在 FileServer 返回 404 或 403 时,使用 Engine 的 ErrorHandler 进行统一处理
-		ecw := AcquireErrorCapturingResponseWriter(c)
-		defer ReleaseErrorCapturingResponseWriter(ecw)
-
-		//
-		// 调用 FileServer 处理请求
-		fileServer.ServeHTTP(ecw, c.Request)
-
-		// 在 FileServer 处理完成后,检查是否捕获到错误状态码,并调用 ErrorHandler
-		ecw.processAfterFileServer()
-
-		// 恢复原始请求路径,以便后续中间件或日志记录使用
-		c.Request.URL.Path = requestPath
-
-		// 中止处理链,因为 FileServer 已经处理了响应
-		c.Abort()
-	})
-}
-
-// Static File 传入一个文件路径, 使用FileServer进行处理
-func (engine *Engine) StaticFile(relativePath, filePath string) {
-	// 清理路径
-	relativePath = path.Clean(relativePath)
-	filePath = path.Clean(filePath)
-
-	// 创建一个文件系统处理器,指向包含目标文件的目录
-	// http.Dir 需要一个目录路径
-	dir := path.Dir(filePath)
-	fileName := path.Base(filePath)
-	fileServer := http.FileServer(http.Dir(dir))
-
-	FileHandle := func(c *Context) {
-		// 检查是否是 GET 或 HEAD 方法
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			// 如果不是,且启用了 MethodNotAllowed 处理,则继续到 MethodNotAllowed 中间件
-			if engine.HandleMethodNotAllowed {
-				c.Next()
-			} else {
-				// 否则,返回 405 Method Not Allowed
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			// 尝试不区分大小写的查找
+			// 直接在 rootNode 上调用 findCaseInsensitivePath 方法
+			ciPath, found := rootNode.findCaseInsensitivePath(requestPath, engine.RedirectTrailingSlash)
+			if found && engine.RedirectFixedPath {
+				c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
+				return
 			}
-			return
 		}
-
-		requestPath := c.Request.URL.Path
-
-		// 构造文件服务器需要处理的请求路径
-		// FileServer 会将请求路径与 http.Dir 的根路径结合
-		// 我们需要将请求路径设置为文件名,以便 FileServer 找到正确的文件
-		c.Request.URL.Path = "/" + fileName // FileServer 期望路径以 / 开头
-
-		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
-		ecw := AcquireErrorCapturingResponseWriter(c)
-		defer ReleaseErrorCapturingResponseWriter(ecw)
-
-		// 调用 FileServer 处理请求
-		fileServer.ServeHTTP(ecw, c.Request)
-
-		// 在 FileServer 处理完成后,检查是否捕获到错误状态码,并调用 ErrorHandler
-		ecw.processAfterFileServer()
-
-		// 恢复原始请求路径
-		c.Request.URL.Path = requestPath
-
-		// 中止处理链,因为 FileServer 已经处理了响应
-		c.Abort()
 	}
 
-	// 注册一个精确匹配的路由
-	engine.GET(relativePath, FileHandle)
-	engine.HEAD(relativePath, FileHandle)
-	engine.OPTIONS(relativePath, FileHandle)
+	// 构建处理链
+	// 组合全局中间件和路由处理函数
+	handlers := engine.globalHandlers
 
-}
-
-// Group的StaticFile
-func (group *RouterGroup) StaticFile(relativePath, filePath string) {
-	// 清理路径
-	relativePath = path.Clean(relativePath)
-	filePath = path.Clean(filePath)
-
-	// 创建一个文件系统处理器,指向包含目标文件的目录
-	// http.Dir 需要一个目录路径
-	dir := path.Dir(filePath)
-	fileName := path.Base(filePath)
-	fileServer := http.FileServer(http.Dir(dir))
-
-	FileHandle := func(c *Context) {
-		// 检查是否是 GET 或 HEAD 方法
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			// 如果不是,且启用了 MethodNotAllowed 处理,则继续到 MethodNotAllowed 中间件
-			if group.engine.HandleMethodNotAllowed {
-				c.Next()
-			} else {
-				// 否则,返回 405 Method Not Allowed
-				group.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-			}
-			return
-		}
-
-		requestPath := c.Request.URL.Path
-
-		// 构造文件服务器需要处理的请求路径
-		// FileServer 会将请求路径与 http.Dir 的根路径结合
-		// 我们需要将请求路径设置为文件名,以便 FileServer 找到正确的文件
-		c.Request.URL.Path = "/" + fileName // FileServer 期望路径以 / 开头
-
-		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
-		ecw := AcquireErrorCapturingResponseWriter(c)
-		defer ReleaseErrorCapturingResponseWriter(ecw)
-
-		// 调用 FileServer 处理请求
-		fileServer.ServeHTTP(ecw, c.Request)
-
-		// 在 FileServer 处理完成后,检查是否捕获到错误状态码,并调用 ErrorHandler
-		ecw.processAfterFileServer()
-
-		// 恢复原始请求路径
-		c.Request.URL.Path = requestPath
-
-		// 中止处理链,因为 FileServer 已经处理了响应
-		c.Abort()
+	// 如果启用了 MethodNotAllowed 处理,并且没有找到精确匹配的路由
+	// 则在全局中间件之后添加 MethodNotAllowed 处理器
+	if engine.HandleMethodNotAllowed {
+		handlers = append(handlers, MethodNotAllowed())
 	}
 
-	// 注册一个精确匹配的路由
-	group.GET(relativePath, FileHandle)
-	group.HEAD(relativePath, FileHandle)
-	group.OPTIONS(relativePath, FileHandle)
-}
-
-// StaticFS
-func (engine *Engine) StaticFS(relativePath string, fs http.FileSystem) {
-	// 清理路径
-	relativePath = path.Clean(relativePath)
-
-	// 确保相对路径以 '/' 结尾,以便 FileServer 正确处理子路径
-	if !strings.HasSuffix(relativePath, "/") {
-		relativePath += "/"
+	// 如果启用了 UnMatchFS 处理,并且没有找到精确匹配的路由和 MethodNotAllowed
+	// 则在处理链的最后添加 UnMatchFS 处理器
+	if engine.unMatchFS.ServeUnmatchedAsFS {
+		/*
+			var unMatchFSHandle = c.engine.unMatchFileServer
+			handlers = append(handlers, unMatchFSHandle)
+		*/
+		handlers = append(handlers, engine.UnMatchFSRoutes...)
 	}
 
-	// 注册一个捕获所有路径的路由,使用 FileServer 处理器
-	engine.ANY(relativePath+"*filepath", FileServer(fs))
-}
-
-// Group的StaticFS
-func (group *RouterGroup) StaticFS(relativePath string, fs http.FileSystem) {
-	// 清理路径
-	relativePath = path.Clean(relativePath)
-
-	// 确保相对路径以 '/' 结尾,以便 FileServer 正确处理子路径
-	if !strings.HasSuffix(relativePath, "/") {
-		relativePath += "/"
+	// 如果用户设置了 NoRoute 处理器,且没有匹配到任何路由、MethodNotAllowed 或 UnMatchFS
+	// 则在处理链的最后添加 NoRoute 处理器
+	if engine.noRoute != nil {
+		handlers = append(handlers, engine.noRoute)
+	} else if len(engine.noRoutes) > 0 {
+		handlers = append(handlers, engine.noRoutes...)
 	}
 
-	// 注册一个捕获所有路径的路由,使用 FileServer 处理器
-	group.ANY(relativePath+"*filepath", FileServer(fs))
-}
+	handlers = append(handlers, NotFound())
 
-// 维护一个Methods列表
-var (
-	MethodGet     = "GET"
-	MethodHead    = "HEAD"
-	MethodPost    = "POST"
-	MethodPut     = "PUT"
-	MethodPatch   = "PATCH"
-	MethodDelete  = "DELETE"
-	MethodConnect = "CONNECT"
-	MethodOptions = "OPTIONS"
-	MethodTrace   = "TRACE"
-)
-
-var MethodsSet = map[string]struct{}{
-	MethodGet:     {},
-	MethodHead:    {},
-	MethodPost:    {},
-	MethodPut:     {},
-	MethodPatch:   {},
-	MethodDelete:  {},
-	MethodConnect: {},
-	MethodOptions: {},
-	MethodTrace:   {},
-}
-
-// HandleFunc 注册一个或多个 HTTP 方法的路由
-// methods 参数是一个字符串切片,包含要注册的 HTTP 方法（例如 []string{"GET", "POST"}）
-// relativePath 是相对于当前组或 Engine 的路径
-// handlers 是处理函数链
-func (engine *Engine) HandleFunc(methods []string, relativePath string, handlers ...HandlerFunc) {
-	for _, method := range methods {
-		if _, ok := MethodsSet[method]; !ok {
-			panic("invalid method: " + method)
-		}
-		engine.Handle(method, relativePath, handlers...)
-	}
-}
-
-// HandleFunc 注册一个或多个 HTTP 方法的路由
-// methods 参数是一个字符串切片,包含要注册的 HTTP 方法（例如 []string{"GET", "POST"}）
-// relativePath 是相对于当前组或 Engine 的路径
-// handlers 是处理函数链
-func (group *RouterGroup) HandleFunc(methods []string, relativePath string, handlers ...HandlerFunc) {
-	for _, method := range methods {
-		if _, ok := MethodsSet[method]; !ok {
-			panic("invalid method: " + method)
-		}
-		group.Handle(method, relativePath, handlers...)
-	}
-}
-
-// FileServer方式, 返回一个HandleFunc, 统一化处理
-func FileServer(fs http.FileSystem) HandlerFunc {
-	return func(c *Context) {
-		// 检查是否是 GET 或 HEAD 方法
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			// 如果不是,且启用了 MethodNotAllowed 处理,则继续到 MethodNotAllowed 中间件
-			if c.engine.HandleMethodNotAllowed {
-				c.Next()
-			} else {
-				// 否则,返回 405 Method Not Allowed
-				c.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, fmt.Errorf("Method %s is Not Allowed on FileServer", c.Request.Method))
-			}
-			return
-		}
-
-		// 使用自定义的 ResponseWriter 包装器来捕获 FileServer 可能返回的错误状态码
-		ecw := AcquireErrorCapturingResponseWriter(c)
-		defer ReleaseErrorCapturingResponseWriter(ecw)
-
-		// 调用 http.FileServer 处理请求
-		http.FileServer(fs).ServeHTTP(ecw, c.Request)
-
-		// 在 FileServer 处理完成后,检查是否捕获到错误状态码,并调用 ErrorHandler
-		ecw.processAfterFileServer()
-
-		// 中止处理链,因为 FileServer 已经处理了响应
-		c.Abort()
-	}
+	c.handlers = handlers
+	c.Next() // 执行处理函数链
+	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 }
