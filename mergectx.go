@@ -69,15 +69,9 @@ func MergeCtx(parents ...context.Context) (ctx context.Context, cancel context.C
 	return mc, mc.cancel
 }
 
-// Value 实现了 context.Context 的 Value 方法.
-// 它会按顺序遍历所有父 context, 并返回第一个找到的非 nil 值.
+// Value 返回当前Ctx Value
 func (mc *mergedContext) Value(key any) any {
-	for _, p := range mc.parents {
-		if v := p.Value(key); v != nil {
-			return v
-		}
-	}
-	return nil
+	return mc.Context.Value(key)
 }
 
 // Deadline 实现了 context.Context 的 Deadline 方法.

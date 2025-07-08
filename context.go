@@ -456,6 +456,12 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 		}()
 	} else {
 		limitBytesReader = c.Request.Body
+		defer func() {
+			err := limitBytesReader.Close()
+			if err != nil {
+				c.AddError(fmt.Errorf("failed to close request body: %w", err))
+			}
+		}()
 	}
 
 	data, err := copyb.ReadAll(limitBytesReader)
@@ -484,6 +490,12 @@ func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
 		}()
 	} else {
 		limitBytesReader = c.Request.Body
+		defer func() {
+			err := limitBytesReader.Close()
+			if err != nil {
+				c.AddError(fmt.Errorf("failed to close request body: %w", err))
+			}
+		}()
 	}
 
 	data, err := copyb.ReadAll(limitBytesReader)
