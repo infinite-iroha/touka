@@ -74,6 +74,9 @@ type Engine struct {
 	// 如果设置了此回调,它将优先于 ServerConfigurator 被用于 HTTPS 服务器
 	// 如果未设置,HTTPS 服务器将回退使用 ServerConfigurator (如果已设置)
 	TLSServerConfigurator func(*http.Server)
+
+	// GlobalMaxRequestBodySize 全局请求体Body大小限制
+	GlobalMaxRequestBodySize int64
 }
 
 type ErrorHandle struct {
@@ -171,10 +174,11 @@ func New() *Engine {
 		unMatchFS: UnMatchFS{
 			ServeUnmatchedAsFS: false,
 		},
-		noRoute:               nil,
-		noRoutes:              make(HandlersChain, 0),
-		ServerConfigurator:    nil,
-		TLSServerConfigurator: nil,
+		noRoute:                  nil,
+		noRoutes:                 make(HandlersChain, 0),
+		ServerConfigurator:       nil,
+		TLSServerConfigurator:    nil,
+		GlobalMaxRequestBodySize: -1,
 	}
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
@@ -292,6 +296,11 @@ func (engine *Engine) SetProtocols(config *ProtocolsConfig) {
 		*engine.serverProtocols = p // 将值赋给指针指向的结构体
 	}()
 	engine.useDefaultProtocols = false
+}
+
+// 配置全局Req Body大小限制
+func (engine *Engine) SetGlobalMaxRequestBodySize(size int64) {
+	engine.GlobalMaxRequestBodySize = size
 }
 
 // 配置Req IP来源 Headers
