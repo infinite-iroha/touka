@@ -271,6 +271,13 @@ func (c *Context) String(code int, format string, values ...interface{}) {
 	c.Writer.Write([]byte(fmt.Sprintf(format, values...)))
 }
 
+// Text 向响应写入无需格式化的string
+func (c *Context) Text(code int, text string) {
+	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	c.Writer.Write([]byte(text))
+}
+
 // JSON 向响应写入 JSON 数据
 // 设置 Content-Type 为 application/json
 func (c *Context) JSON(code int, obj interface{}) {
