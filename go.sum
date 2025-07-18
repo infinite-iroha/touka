@@ -1,5 +1,7 @@
 github.com/WJQSERVER-STUDIO/go-utils/copyb v0.0.6 h1:/50VJYXd6jcu+p5BnEBDyiX0nAyGxas1W3DCnrYMxMY=
 github.com/WJQSERVER-STUDIO/go-utils/copyb v0.0.6/go.mod h1:FZ6XE+4TKy4MOfX1xWKe6Rwsg0ucYFCdNh1KLvyKTfc=
+github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.2 h1:AiIHXP21LpK7pFfqUlUstgQEWzjbekZgxOuvVwiMfyM=
+github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.2/go.mod h1:mCLqYU32bTmEE6dpj37MKKiZgz70Jh/xyK9vVbq6pok=
 github.com/WJQSERVER-STUDIO/httpc v0.8.1 h1:/eG8aYKL3WfQILIRbG+cbzQjPkNHEPTqfGUdQS5rtI4=
 github.com/WJQSERVER-STUDIO/httpc v0.8.1/go.mod h1:mxXBf2hqbQGNHkVy/7wfU7Xi2s09MyZpbY2hyR+4uD4=
 github.com/fenthope/reco v0.0.3 h1:RmnQ0D9a8PWtwOODawitTe4BztTnS9wYwrDbipISNq4=
