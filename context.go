@@ -23,7 +23,7 @@ import (
 	"github.com/fenthope/reco"
 	"github.com/go-json-experiment/json"
 
-	"github.com/WJQSERVER-STUDIO/go-utils/copyb"
+	"github.com/WJQSERVER-STUDIO/go-utils/iox"
 	"github.com/WJQSERVER-STUDIO/httpc"
 )
 
@@ -431,7 +431,7 @@ func (c *Context) WriteStream(reader io.Reader) (written int64, err error) {
 		c.Writer.WriteHeader(http.StatusOK) // 默认 200 OK
 	}
 
-	written, err = copyb.Copy(c.Writer, reader) // 从 reader 读取并写入 ResponseWriter
+	written, err = iox.Copy(c.Writer, reader) // 从 reader 读取并写入 ResponseWriter
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to write stream: %w", err))
 	}
@@ -471,7 +471,7 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 		}()
 	}
 
-	data, err := copyb.ReadAll(limitBytesReader)
+	data, err := iox.ReadAll(limitBytesReader)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -505,7 +505,7 @@ func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
 		}()
 	}
 
-	data, err := copyb.ReadAll(limitBytesReader)
+	data, err := iox.ReadAll(limitBytesReader)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -678,7 +678,7 @@ func (c *Context) SetBodyStream(reader io.Reader, contentSize int) {
 
 	// 将 reader 的内容直接复制到 ResponseWriter
 	// ResponseWriter 实现了 io.Writer 接口
-	_, err := copyb.Copy(c.Writer, reader)
+	_, err := iox.Copy(c.Writer, reader)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to write stream: %w", err))
 		// 注意：这里可能无法设置错误状态码，因为头部可能已经发送
@@ -737,7 +737,7 @@ func (c *Context) SetRespBodyFile(code int, filePath string) {
 	c.Writer.WriteHeader(code)
 
 	// 将文件内容写入响应体
-	_, err = copyb.Copy(c.Writer, file)
+	_, err = iox.Copy(c.Writer, file)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to write file %s to response: %w", cleanPath, err))
 		// 注意：这里可能无法设置错误状态码，因为头部可能已经发送
