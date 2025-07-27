@@ -7,7 +7,6 @@ package touka
 import (
 	"context"
 	"errors"
-	"log"
 	"reflect"
 	"runtime"
 	"strings"
@@ -148,7 +147,7 @@ func defaultErrorWarp(handler ErrorHandler) ErrorHandler {
 			return
 		default:
 			if c.Writer.Written() {
-				log.Printf("errpage: response already started for status %d, skipping error page rendering,  err: %v", code, err)
+				c.Debugf("errpage: response already started for status %d, skipping error page rendering,  err: %v", code, err)
 				return
 			}
 		}
@@ -163,7 +162,7 @@ func defaultErrorWarp(handler ErrorHandler) ErrorHandler {
 		// 避免在客户端已关闭连接后写入响应导致的问题
 		// 检查 context.Context 是否已取消
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			log.Printf("errpage: client disconnected, skipping error page rendering for status %d, err: %v", code, err)
+			c.Debugf("errpage: client disconnected, skipping error page rendering for status %d, err: %v", code, err)
 			return
 		}
 
