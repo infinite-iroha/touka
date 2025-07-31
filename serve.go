@@ -128,6 +128,79 @@ func handleGracefulShutdown(servers []*http.Server, timeout time.Duration, logge
 	return nil
 }
 
+func handleGracefulShutdownWithContext(servers []*http.Server, ctx context.Context, timeout time.Duration, logger *reco.Logger) error {
+	// 创建一个 channel 来接收操作系统信号
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM) // 监听中断和终止信号
+
+	// 启动服务器
+	serverStopped := make(chan error, 1)
+	for _, srv := range servers {
+		go func(s *http.Server) {
+			serverStopped <- s.ListenAndServe()
+		}(srv)
+	}
+
+	select {
+	case <-ctx.Done():
+		// Context 被取消 (例如,通过外部取消函数)
+		log.Println("Context cancelled, shutting down Touka server(s)...")
+	case err := <-serverStopped:
+		// 服务器自身停止 (例如,端口被占用,或 ListenAndServe 返回错误)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("Touka HTTP server failed: %w", err)
+		}
+		log.Println("Touka HTTP server stopped gracefully.")
+		return nil // 服务器已自行优雅关闭,无需进一步处理
+	case <-quit:
+		// 接收到操作系统信号
+		log.Println("Shutting down Touka server(s) due to OS signal...")
+	}
+
+	// 关闭日志记录器
+	if logger != nil {
+		go func() {
+			log.Println("Closing Touka logger...")
+			CloseLogger(logger)
+		}()
+	}
+
+	// 创建一个带超时的上下文,用于 Shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(servers)) // 用于收集关闭错误的 channel
+
+	// 并发地关闭所有服务器
+	for _, srv := range servers {
+		wg.Add(1)
+		go func(s *http.Server) {
+			defer wg.Done()
+			if err := s.Shutdown(shutdownCtx); err != nil {
+				// 将错误发送到 channel
+				errChan <- fmt.Errorf("server on %s shutdown failed: %w", s.Addr, err)
+			}
+		}(srv)
+	}
+
+	wg.Wait()
+	close(errChan) // 关闭 channel,以便可以安全地遍历它
+
+	// 收集所有关闭过程中发生的错误
+	var shutdownErrors []error
+	for err := range errChan {
+		shutdownErrors = append(shutdownErrors, err)
+		log.Printf("Shutdown error: %v", err)
+	}
+
+	if len(shutdownErrors) > 0 {
+		return errors.Join(shutdownErrors...) // Go 1.20+ 的 errors.Join,用于合并多个错误
+	}
+	log.Println("Touka server(s) exited gracefully.")
+	return nil
+}
+
 // --- 公共 Run 方法 ---
 
 // Run 启动一个不支持优雅关闭的 HTTP 服务器
@@ -161,6 +234,22 @@ func (engine *Engine) RunShutdown(addr string, timeouts ...time.Duration) error 
 
 	runServer("HTTP", srv)
 	return handleGracefulShutdown([]*http.Server{srv}, getShutdownTimeout(timeouts), engine.LogReco)
+}
+
+// RunShutdown 启动一个支持优雅关闭的 HTTP 服务器
+func (engine *Engine) RunShutdownWithContext(addr string, ctx context.Context, timeouts ...time.Duration) error {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: engine,
+	}
+
+	// 应用框架的默认配置和用户提供的自定义配置
+	//engine.applyDefaultServerConfig(srv)
+	if engine.ServerConfigurator != nil {
+		engine.ServerConfigurator(srv)
+	}
+
+	return handleGracefulShutdownWithContext([]*http.Server{srv}, ctx, getShutdownTimeout(timeouts), engine.LogReco)
 }
 
 // RunTLS 启动一个支持优雅关闭的 HTTPS 服务器
