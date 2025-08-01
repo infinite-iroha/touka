@@ -1021,3 +1021,58 @@ func TestWildcardInvalidSlash(t *testing.T) {
 		}
 	}
 }
+
+// TestComplexBacktrackingWithCatchAll 是一个更复杂的回归测试.
+// 它确保在静态路径匹配失败后, 路由器能够正确地回溯并成功匹配一个
+// 包含多个命名参数、静态部分和捕获所有参数的复杂路由.
+// 这个测试对于验证在禁用 RedirectTrailingSlash 时的算法健壮性至关重要.
+func TestComplexBacktrackingWithCatchAll(t *testing.T) {
+	// 1. Arrange: 初始化路由树并设置复杂的路由结构
+	tree := &node{}
+	routes := [...]string{
+		"/abc/b",                     // 静态诱饵路由
+		"/abc/:p1/cde",               // 一个不相关的、不会被匹配到的干扰路由
+		"/abc/:p1/:p2/def/*filepath", // 最终应该匹配到的复杂目标路由
+	}
+	for _, route := range routes {
+		tree.addRoute(route, fakeHandler(route))
+	}
+
+	// 2. Act: 执行一个会触发深度回溯的请求
+	// 这个路径会首先尝试匹配静态的 /abc/b, 但因为后续路径不匹配而失败,
+	// 从而强制回溯到 /abc/ 节点, 并重新尝试匹配通配符路径.
+	reqPath := "/abc/b/d/def/some/file.txt"
+	wantRoute := "/abc/:p1/:p2/def/*filepath"
+	wantParams := Params{
+		{Key: "p1", Value: "b"},
+		{Key: "p2", Value: "d"},
+		{Key: "filepath", Value: "/some/file.txt"}, // 注意: catch-all 会包含前导斜杠
+	}
+
+	// 使用 defer/recover 来断言整个过程不会发生 panic
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("预期不应发生 panic, 但在处理路径 '%s' 时捕获到了: %v", reqPath, r)
+		}
+	}()
+
+	// 执行查找操作
+	value := tree.getValue(reqPath, getParams(), getSkippedNodes(), false)
+
+	// 3. Assert: 验证回溯后的结果是否正确
+	// 断言找到了一个有效的句柄
+	if value.handlers == nil {
+		t.Fatalf("处理路径 '%s' 时句柄不匹配: 期望得到非空的句柄, 但实际为 nil", reqPath)
+	}
+
+	// 断言匹配到了正确的路由
+	value.handlers[0](nil)
+	if fakeHandlerValue != wantRoute {
+		t.Errorf("处理路径 '%s' 时句柄不匹配: \n 得到: %s\n 想要: %s", reqPath, fakeHandlerValue, wantRoute)
+	}
+
+	// 断言URL参数被正确地解析和提取
+	if value.params == nil || !reflect.DeepEqual(*value.params, wantParams) {
+		t.Errorf("处理路径 '%s' 时参数不匹配: \n 得到: %v\n 想要: %v", reqPath, *value.params, wantParams)
+	}
+}
