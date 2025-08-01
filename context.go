@@ -564,7 +564,7 @@ func (c *Context) RequestIP() string {
 	addrp, err := netip.ParseAddrPort(c.Request.RemoteAddr)
 	if err == nil {
 		// 成功从 "ip:port" 格式中解析出 IP
-		return addrp.String()
+		return addrp.Addr().String()
 	}
 
 	// 如果上面的解析失败 (例如 RemoteAddr 只有 IP, 没有端口),
