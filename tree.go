@@ -453,9 +453,9 @@ type nodeValue struct {
 
 // skippedNode 结构体用于在 getValue 查找过程中记录跳过的节点信息，以便回溯。
 type skippedNode struct {
-	path        string // 跳过时的当前路径
-	node        *node  // 跳过的节点
-	paramsCount int16  // 跳过时已收集的参数数量
+	path        string // 跳过时的完整请求路径段 (n.path + remaining path at that point)
+	node        *node  // 当时被跳过的节点 (n), direct pointer
+	paramsCount int16  // 当时已收集的参数数量
 }
 
 // getValue 返回注册到给定路径（key）的处理函数。通配符的值会保存到 map 中。
@@ -477,21 +477,11 @@ walk: // 外部循环用于遍历路由树
 					if c == idxc { // 如果找到匹配的索引字符
 						// 如果当前节点有通配符子节点，则将当前节点添加到 skippedNodes，以便回溯
 						if n.wildChild {
-							index := len(*skippedNodes)
-							*skippedNodes = (*skippedNodes)[:index+1]
-							(*skippedNodes)[index] = skippedNode{
-								path: prefix + path, // 记录跳过的路径
-								node: &node{ // 复制当前节点的状态
-									path:      n.path,
-									wildChild: n.wildChild,
-									nType:     n.nType,
-									priority:  n.priority,
-									children:  n.children,
-									handlers:  n.handlers,
-									fullPath:  n.fullPath,
-								},
+							*skippedNodes = append(*skippedNodes, skippedNode{
+								path:        prefix + path, // Path is n.path + remaining path after matching n.path
+								node:        n,             // Store pointer to the original node `n`
 								paramsCount: globalParamsCount, // 记录当前参数计数
-							}
+							})
 						}
 
 						n = n.children[i] // 移动到匹配的子节点
