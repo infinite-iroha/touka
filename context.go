@@ -14,7 +14,6 @@ import (
 	"io"
 	"math"
 	"mime"
-	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -523,39 +522,59 @@ func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
 func (c *Context) RequestIP() string {
 	if c.engine.ForwardByClientIP {
 		for _, headerName := range c.engine.RemoteIPHeaders {
-			if ipValue := c.Request.Header.Get(headerName); ipValue != "" {
-				// X-Forwarded-For 可能包含多个 IP，约定第一个（最左边）是客户端 IP
-				// 其他头部（如 X-Real-IP）通常只有一个
-				ips := strings.Split(ipValue, ",")
-				for _, singleIP := range ips {
-					trimmedIP := strings.TrimSpace(singleIP)
-					// 使用 netip.ParseAddr 进行 IP 地址的解析和格式验证
-					addr, err := netip.ParseAddr(trimmedIP)
-					if err == nil {
-						// 成功解析到合法的 IP 地址格式，立即返回
-						return addr.String()
-					}
-					// 如果当前 singleIP 无效，继续检查列表中的下一个
+			ipValue := c.Request.Header.Get(headerName)
+			if ipValue == "" {
+				continue // 头部为空, 继续检查下一个
+			}
+
+			// 使用索引高效遍历逗号分隔的 IP 列表, 避免 strings.Split 的内存分配
+			currentPos := 0
+			for currentPos < len(ipValue) {
+				nextComma := strings.IndexByte(ipValue[currentPos:], ',')
+
+				var ipSegment string
+				if nextComma == -1 {
+					// 这是列表中的最后一个 IP
+					ipSegment = ipValue[currentPos:]
+					currentPos = len(ipValue) // 结束循环
+				} else {
+					// 截取当前 IP 段
+					ipSegment = ipValue[currentPos : currentPos+nextComma]
+					currentPos += nextComma + 1 // 移动到下一个 IP 段的起始位置
+				}
+
+				// 去除空格并检查是否为空 (例如 "ip1,,ip2")
+				trimmedIP := strings.TrimSpace(ipSegment)
+				if trimmedIP == "" {
+					continue
+				}
+
+				// 使用 netip.ParseAddr 进行 IP 地址的解析和验证
+				addr, err := netip.ParseAddr(trimmedIP)
+				if err == nil {
+					// 成功解析到合法的 IP, 立即返回
+					return addr.String()
 				}
 			}
 		}
 	}
 
-	// 如果没有启用 ForwardByClientIP 或头部中没有找到有效 IP，回退到 Request.RemoteAddr
-	// RemoteAddr 通常是 "host:port" 格式，但也可能直接就是 IP 地址
-	remoteAddrStr := c.Request.RemoteAddr
-	ip, _, err := net.SplitHostPort(remoteAddrStr) // 尝试分离 host 和 port
-	if err != nil {
-		// 如果分离失败，意味着 remoteAddrStr 可能直接就是 IP 地址（或畸形）
-		ip = remoteAddrStr // 此时将整个 remoteAddrStr 作为候选 IP
+	// 回退到 Request.RemoteAddr 的处理
+	// 优先使用 netip.ParseAddrPort, 它比 net.SplitHostPort 更高效且分配更少
+	addrp, err := netip.ParseAddrPort(c.Request.RemoteAddr)
+	if err == nil {
+		// 成功从 "ip:port" 格式中解析出 IP
+		return addrp.Addr().String()
 	}
 
-	// 对从 RemoteAddr 中提取/使用的 IP 进行最终的合法性验证
-	addr, parseErr := netip.ParseAddr(ip)
-	if parseErr == nil {
-		return addr.String() // 成功解析并返回合法 IP
+	// 如果上面的解析失败 (例如 RemoteAddr 只有 IP, 没有端口),
+	// 则尝试将整个字符串作为 IP 地址进行解析
+	addr, err := netip.ParseAddr(c.Request.RemoteAddr)
+	if err == nil {
+		return addr.String()
 	}
 
+	// 所有方法都失败, 返回空字符串
 	return ""
 }
 
