@@ -489,6 +489,7 @@ walk: // 外部循环用于遍历路由树
 								path: prefix + path, // 记录跳过的路径
 								node: &node{ // 复制当前节点的状态
 									path:      n.path,
+									indices:   n.indices,
 									wildChild: n.wildChild,
 									nType:     n.nType,
 									priority:  n.priority,
