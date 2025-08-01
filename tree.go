@@ -293,6 +293,12 @@ walk: // 外部循环用于遍历和构建路由树
 	}
 }
 
+func (n *node) copyChildren() []*node {
+	children := make([]*node, len(n.children))
+	copy(children, n.children)
+	return children
+}
+
 // findWildcard 搜索通配符段并检查名称是否包含无效字符。
 // 如果未找到通配符，则返回 -1 作为索引。
 func findWildcard(path string) (wildcard string, i int, valid bool) {
@@ -483,10 +489,11 @@ walk: // 外部循环用于遍历路由树
 								path: prefix + path, // 记录跳过的路径
 								node: &node{ // 复制当前节点的状态
 									path:      n.path,
+									indices:   n.indices,
 									wildChild: n.wildChild,
 									nType:     n.nType,
 									priority:  n.priority,
-									children:  n.children,
+									children:  n.copyChildren(),
 									handlers:  n.handlers,
 									fullPath:  n.fullPath,
 								},
