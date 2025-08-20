@@ -6,7 +6,6 @@ package touka
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"path"
 	"strings"
@@ -19,13 +18,19 @@ var allowedFileServerMethods = map[string]struct{}{
 	http.MethodHead: {},
 }
 
+var (
+	ErrInputFSisNil     = errors.New("input FS is nil")
+	ErrMethodNotAllowed = errors.New("method not allowed")
+)
+
 // FileServer方式, 返回一个HandleFunc, 统一化处理
 func FileServer(fs http.FileSystem) HandlerFunc {
 	if fs == nil {
 		return func(c *Context) {
-			c.ErrorUseHandle(500, errors.New("Input FileSystem is nil"))
+			c.ErrorUseHandle(http.StatusInternalServerError, ErrInputFSisNil)
 		}
 	}
+
 	fileServerInstance := http.FileServer(fs)
 	return func(c *Context) {
 		FileServerHandleServe(c, fileServerInstance)
@@ -37,7 +42,6 @@ func FileServer(fs http.FileSystem) HandlerFunc {
 
 func FileServerHandleServe(c *Context, fsHandle http.Handler) {
 	if fsHandle == nil {
-		ErrInputFSisNil := errors.New("Input FileSystem Handle is nil")
 		c.AddError(ErrInputFSisNil)
 		// 500
 		c.ErrorUseHandle(http.StatusInternalServerError, ErrInputFSisNil)
@@ -59,7 +63,7 @@ func FileServerHandleServe(c *Context, fsHandle http.Handler) {
 					return
 				} else {
 					// 否则,返回 405 Method Not Allowed
-					c.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, fmt.Errorf("Method %s is Not Allowed on FileServer", c.Request.Method))
+					c.engine.errorHandle.handler(c, http.StatusMethodNotAllowed, ErrMethodNotAllowed)
 				}
 			} else {
 				c.Next()
