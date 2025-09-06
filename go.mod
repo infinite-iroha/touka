@@ -1,6 +1,6 @@
 module github.com/infinite-iroha/touka
 
-go 1.24.5
+go 1.25.1
 
 require (
 	github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.2
