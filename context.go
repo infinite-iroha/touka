@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/WJQSERVER/wanf"
 	"github.com/fenthope/reco"
 	"github.com/go-json-experiment/json"
 
@@ -42,7 +43,7 @@ type Context struct {
 	index    int8          // 当前执行到处理链的哪个位置
 
 	mu   sync.RWMutex
-	Keys map[string]interface{} // 用于在中间件之间传递数据
+	Keys map[string]any // 用于在中间件之间传递数据
 
 	Errors []error // 用于收集处理过程中的错误
 
@@ -77,20 +78,18 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	} else {
 		c.Writer = newResponseWriter(w)
 	}
-	//c.Writer = newResponseWriter(w)
 
 	c.Request = req
 	c.Params = c.Params[:0] // 清空 Params 切片，而不是重新分配，以复用底层数组
 	c.handlers = nil
 	c.index = -1                          // 初始为 -1，`Next()` 将其设置为 0
-	c.Keys = make(map[string]interface{}) // 每次请求重新创建 map，避免数据污染
+	c.Keys = make(map[string]any)         // 每次请求重新创建 map，避免数据污染
 	c.Errors = c.Errors[:0]               // 清空 Errors 切片
 	c.queryCache = nil                    // 清空查询参数缓存
 	c.formCache = nil                     // 清空表单数据缓存
 	c.ctx = req.Context()                 // 使用请求的上下文，继承其取消信号和值
 	c.sameSite = http.SameSiteDefaultMode // 默认 SameSite 模式
 	c.MaxRequestBodySize = c.engine.GlobalMaxRequestBodySize
-	// c.HTTPClient 和 c.engine 保持不变，它们引用 Engine 实例的成员
 }
 
 // Next 在处理链中执行下一个处理函数
@@ -122,10 +121,10 @@ func (c *Context) AbortWithStatus(code int) {
 
 // Set 将一个键值对存储到 Context 中
 // 这是一个线程安全的操作，用于在中间件之间传递数据
-func (c *Context) Set(key string, value interface{}) {
+func (c *Context) Set(key string, value any) {
 	c.mu.Lock() // 加写锁
 	if c.Keys == nil {
-		c.Keys = make(map[string]interface{})
+		c.Keys = make(map[string]any)
 	}
 	c.Keys[key] = value
 	c.mu.Unlock() // 解写锁
@@ -133,7 +132,7 @@ func (c *Context) Set(key string, value interface{}) {
 
 // Get 从 Context 中获取一个值
 // 这是一个线程安全的操作
-func (c *Context) Get(key string) (value interface{}, exists bool) {
+func (c *Context) Get(key string) (value any, exists bool) {
 	c.mu.RLock() // 加读锁
 	value, exists = c.Keys[key]
 	c.mu.RUnlock() // 解读锁
@@ -208,7 +207,7 @@ func (c *Context) GetDuration(key string) (value time.Duration, exists bool) {
 
 // MustGet 从 Context 中获取一个值，如果不存在则 panic
 // 适用于确定值一定存在的场景
-func (c *Context) MustGet(key string) interface{} {
+func (c *Context) MustGet(key string) any {
 	if value, exists := c.Get(key); exists {
 		return value
 	}
@@ -269,7 +268,7 @@ func (c *Context) Raw(code int, contentType string, data []byte) {
 }
 
 // String 向响应写入格式化的字符串
-func (c *Context) String(code int, format string, values ...interface{}) {
+func (c *Context) String(code int, format string, values ...any) {
 	c.Writer.WriteHeader(code)
 	c.Writer.Write([]byte(fmt.Sprintf(format, values...)))
 }
@@ -283,7 +282,7 @@ func (c *Context) Text(code int, text string) {
 
 // JSON 向响应写入 JSON 数据
 // 设置 Content-Type 为 application/json
-func (c *Context) JSON(code int, obj interface{}) {
+func (c *Context) JSON(code int, obj any) {
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
 	if err := json.MarshalWrite(c.Writer, obj); err != nil {
@@ -295,7 +294,7 @@ func (c *Context) JSON(code int, obj interface{}) {
 
 // GOB 向响应写入GOB数据
 // 设置 Content-Type 为 application/octet-stream
-func (c *Context) GOB(code int, obj interface{}) {
+func (c *Context) GOB(code int, obj any) {
 	c.Writer.Header().Set("Content-Type", "application/octet-stream") // 设置合适的 Content-Type
 	c.Writer.WriteHeader(code)
 	// GOB 编码
@@ -307,11 +306,25 @@ func (c *Context) GOB(code int, obj interface{}) {
 	}
 }
 
+// WANF向响应写入WANF数据
+// 设置 application/vnd.wjqserver.wanf; charset=utf-8
+func (c *Context) WANF(code int, obj any) {
+	c.Writer.Header().Set("Content-Type", "application/vnd.wjqserver.wanf; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	// WANF 编码
+	encoder := wanf.NewStreamEncoder(c.Writer)
+	if err := encoder.Encode(obj); err != nil {
+		c.AddError(fmt.Errorf("failed to encode WANF: %w", err))
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode WANF: %w", err))
+		return
+	}
+}
+
 // HTML 渲染 HTML 模板
 // 如果 Engine 配置了 HTMLRender，则使用它进行渲染
 // 否则，会进行简单的字符串输出
 // 预留接口，可以扩展为支持多种模板引擎
-func (c *Context) HTML(code int, name string, obj interface{}) {
+func (c *Context) HTML(code int, name string, obj any) {
 	c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	c.Writer.WriteHeader(code)
 
@@ -342,7 +355,7 @@ func (c *Context) Redirect(code int, location string) {
 }
 
 // ShouldBindJSON 尝试将请求体绑定到 JSON 对象
-func (c *Context) ShouldBindJSON(obj interface{}) error {
+func (c *Context) ShouldBindJSON(obj any) error {
 	if c.Request.Body == nil {
 		return errors.New("request body is empty")
 	}
@@ -353,10 +366,28 @@ func (c *Context) ShouldBindJSON(obj interface{}) error {
 	return nil
 }
 
+// ShouldBindWANF
+func (c *Context) ShouldBindWANF(obj any) error {
+	if c.Request.Body == nil {
+		return errors.New("request body is empty")
+	}
+	decoder, err := wanf.NewStreamDecoder(c.Request.Body)
+	if err != nil {
+		return fmt.Errorf("failed to create WANF decoder: %w", err)
+	}
+
+	if err := decoder.Decode(obj); err != nil {
+		return fmt.Errorf("WANF binding error: %w", err)
+	}
+	return nil
+}
+
+// Deprecated: This function is a reserved placeholder for future API extensions
+// and is not yet implemented. It will either be properly defined or removed in v2.0.0. Do not use.
 // ShouldBind 尝试将请求体绑定到各种类型（JSON, Form, XML 等）
 // 这是一个复杂的通用绑定接口，通常根据 Content-Type 或其他头部来判断绑定方式
 // 预留接口，可根据项目需求进行扩展
-func (c *Context) ShouldBind(obj interface{}) error {
+func (c *Context) ShouldBind(obj any) error {
 	// TODO: 完整的通用绑定逻辑
 	// 可以根据 c.Request.Header.Get("Content-Type") 来判断是 JSON, Form, XML 等
 	// 例如：
@@ -409,7 +440,7 @@ func (c *Context) Err() error {
 // Value returns the value associated with this context for key, or nil if no
 // value is associated with key.
 // 可以用于从 Context 中获取与特定键关联的值，包括 Go 原生 Context 的值和 Touka Context 的 Keys
-func (c *Context) Value(key interface{}) interface{} {
+func (c *Context) Value(key any) any {
 	if keyAsString, ok := key.(string); ok {
 		if val, exists := c.Get(keyAsString); exists {
 			return val
