@@ -244,7 +244,7 @@ func (engine *Engine) StaticFS(relativePath string, fs http.FileSystem) {
 		relativePath += "/"
 	}
 
-	fileServer := http.FileServer(fs)
+	fileServer := http.StripPrefix(relativePath, http.FileServer(fs))
 	engine.ANY(relativePath+"*filepath", GetStaticFSHandleFunc(fileServer))
 }
 
@@ -258,7 +258,7 @@ func (group *RouterGroup) StaticFS(relativePath string, fs http.FileSystem) {
 		relativePath += "/"
 	}
 
-	fileServer := http.FileServer(fs)
+	fileServer := http.StripPrefix(relativePath, http.FileServer(fs))
 	group.ANY(relativePath+"*filepath", GetStaticFSHandleFunc(fileServer))
 }
 
