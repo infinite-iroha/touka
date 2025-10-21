@@ -18,7 +18,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -279,6 +279,113 @@ func (c *Context) Text(code int, text string) {
 	c.Writer.WriteHeader(code)
 	c.Writer.Write([]byte(text))
 }
+
+// FileText
+func (c *Context) FileText(code int, filePath string) {
+	// 清理path
+	cleanPath := filepath.Clean(filePath)
+	if !filepath.IsAbs(cleanPath) {
+		c.AddError(fmt.Errorf("relative path not allowed: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("relative path not allowed"))
+		return
+	}
+	// 检查文件是否存在
+	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+		c.AddError(fmt.Errorf("file not found: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusNotFound, fmt.Errorf("file not found"))
+		return
+	}
+
+	// 打开文件
+	file, err := os.Open(cleanPath)
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to open file %s: %w", cleanPath, err))
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to open file: %w", err))
+		return
+	}
+	defer file.Close()
+
+	// 获取文件信息以获取文件大小
+	fileInfo, err := file.Stat()
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to get file info for %s: %w", cleanPath, err))
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to get file info: %w", err))
+		return
+	}
+	// 判断是否是dir
+	if fileInfo.IsDir() {
+		c.AddError(fmt.Errorf("path is a directory, not a file: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("path is a directory"))
+		return
+	}
+
+	c.SetHeader("Content-Type", "text/plain; charset=utf-8")
+
+	c.SetBodyStream(file, int(fileInfo.Size()))
+}
+
+/*
+// not fot work
+// FileTextSafeDir
+func (c *Context) FileTextSafeDir(code int, filePath string, safeDir string) {
+
+	// 清理path
+	cleanPath := path.Clean(filePath)
+	if !filepath.IsAbs(cleanPath) {
+		c.AddError(fmt.Errorf("relative path not allowed: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("relative path not allowed"))
+		return
+	}
+	if strings.Contains(cleanPath, "..") {
+		c.AddError(fmt.Errorf("path traversal attempt detected: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("path traversal attempt detected"))
+		return
+	}
+
+	// 判断filePath是否包含在safeDir内, 防止路径穿越
+	relPath, err := filepath.Rel(safeDir, cleanPath)
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to get relative path: %w", err))
+		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("failed to get relative path: %w", err))
+		return
+	}
+	cleanPath = filepath.Join(safeDir, relPath)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+		c.AddError(fmt.Errorf("file not found: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusNotFound, fmt.Errorf("file not found"))
+		return
+	}
+
+	// 打开文件
+	file, err := os.Open(cleanPath)
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to open file %s: %w", cleanPath, err))
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to open file: %w", err))
+		return
+	}
+	defer file.Close()
+
+	// 获取文件信息以获取文件大小
+	fileInfo, err := file.Stat()
+	if err != nil {
+		c.AddError(fmt.Errorf("failed to get file info for %s: %w", cleanPath, err))
+		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to get file info: %w", err))
+		return
+	}
+	// 判断是否是dir
+	if fileInfo.IsDir() {
+		c.AddError(fmt.Errorf("path is a directory, not a file: %s", cleanPath))
+		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("path is a directory"))
+		return
+	}
+
+	c.SetHeader("Content-Type", "text/plain; charset=utf-8")
+
+	c.SetBodyStream(file, int(fileInfo.Size()))
+}
+*/
 
 // JSON 向响应写入 JSON 数据
 // 设置 Content-Type 为 application/json
@@ -755,7 +862,7 @@ func (c *Context) GetRequestURIPath() string {
 // 将文件内容作为响应body
 func (c *Context) SetRespBodyFile(code int, filePath string) {
 	// 清理path
-	cleanPath := path.Clean(filePath)
+	cleanPath := filepath.Clean(filePath)
 
 	// 打开文件
 	file, err := os.Open(cleanPath)
@@ -775,7 +882,7 @@ func (c *Context) SetRespBodyFile(code int, filePath string) {
 	}
 
 	// 尝试根据文件扩展名猜测 Content-Type
-	contentType := mime.TypeByExtension(path.Ext(cleanPath))
+	contentType := mime.TypeByExtension(filepath.Ext(cleanPath))
 	if contentType == "" {
 		// 如果无法猜测，则使用默认的二进制流类型
 		contentType = "application/octet-stream"
