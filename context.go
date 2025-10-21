@@ -18,7 +18,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -284,15 +283,10 @@ func (c *Context) Text(code int, text string) {
 // FileText
 func (c *Context) FileText(code int, filePath string) {
 	// 清理path
-	cleanPath := path.Clean(filePath)
+	cleanPath := filepath.Clean(filePath)
 	if !filepath.IsAbs(cleanPath) {
 		c.AddError(fmt.Errorf("relative path not allowed: %s", cleanPath))
 		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("relative path not allowed"))
-		return
-	}
-	if strings.Contains(cleanPath, "..") {
-		c.AddError(fmt.Errorf("path traversal attempt detected: %s", cleanPath))
-		c.ErrorUseHandle(http.StatusBadRequest, fmt.Errorf("path traversal attempt detected"))
 		return
 	}
 	// 检查文件是否存在
@@ -868,7 +862,7 @@ func (c *Context) GetRequestURIPath() string {
 // 将文件内容作为响应body
 func (c *Context) SetRespBodyFile(code int, filePath string) {
 	// 清理path
-	cleanPath := path.Clean(filePath)
+	cleanPath := filepath.Clean(filePath)
 
 	// 打开文件
 	file, err := os.Open(cleanPath)
@@ -888,7 +882,7 @@ func (c *Context) SetRespBodyFile(code int, filePath string) {
 	}
 
 	// 尝试根据文件扩展名猜测 Content-Type
-	contentType := mime.TypeByExtension(path.Ext(cleanPath))
+	contentType := mime.TypeByExtension(filepath.Ext(cleanPath))
 	if contentType == "" {
 		// 如果无法猜测，则使用默认的二进制流类型
 		contentType = "application/octet-stream"
