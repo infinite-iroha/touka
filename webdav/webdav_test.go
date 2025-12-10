@@ -75,7 +75,7 @@ func TestHandlePropfind(t *testing.T) {
 
 	// Create a test directory and a test file
 	fs.Mkdir(nil, "/testdir", 0755)
-	file, _ := fs.OpenFile(nil, "/testdir/testfile", os.O_CREATE|os.O_WRONLY, 0644)
+	file, _ := fs.OpenFile(&touka.Context{Request: &http.Request{}}, "/testdir/testfile", os.O_CREATE|os.O_WRONLY, 0644)
 	file.Write([]byte("test content"))
 	file.Close()
 

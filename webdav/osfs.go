@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/infinite-iroha/touka"
 )
 
 // OSFS is a WebDAV FileSystem that uses the local OS file system.
@@ -98,7 +100,7 @@ func (f *osFile) Readdir(count int) ([]ObjectInfo, error) {
 }
 
 // OpenFile opens a file.
-func (fs *OSFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (File, error) {
+func (fs *OSFS) OpenFile(c *touka.Context, name string, flag int, perm os.FileMode) (File, error) {
 	path, err := fs.resolve(name)
 	if err != nil {
 		return nil, err

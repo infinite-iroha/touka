@@ -10,7 +10,10 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/infinite-iroha/touka"
 )
 
 // MemFS is an in-memory file system for WebDAV using a tree structure.
@@ -85,7 +88,7 @@ func (fs *MemFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error
 }
 
 // OpenFile opens a file in the in-memory file system.
-func (fs *MemFS) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (File, error) {
+func (fs *MemFS) OpenFile(c *touka.Context, name string, flag int, perm os.FileMode) (File, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -111,15 +114,16 @@ func (fs *MemFS) OpenFile(ctx context.Context, name string, flag int, perm os.Fi
 
 	if flag&os.O_TRUNC != 0 {
 		node.data = nil
-		node.size = 0
+		atomic.StoreInt64(&node.size, 0)
 	}
 
-	return &memFile{
-		node:     node,
-		fs:       fs,
-		offset:   0,
-		fullPath: name,
-	}, nil
+	mf := memFilePool.Get().(*memFile)
+	mf.node = node
+	mf.fs = fs
+	mf.offset = 0
+	mf.fullPath = name
+	mf.contentLength = c.Request.ContentLength
+	return mf, nil
 }
 
 // RemoveAll removes a file or directory from the in-memory file system.
@@ -194,20 +198,32 @@ type memNode struct {
 }
 
 func (n *memNode) Name() string       { return n.name }
-func (n *memNode) Size() int64        { return n.size }
+func (n *memNode) Size() int64        { return atomic.LoadInt64(&n.size) }
 func (n *memNode) Mode() os.FileMode  { return n.mode }
 func (n *memNode) ModTime() time.Time { return n.modTime }
 func (n *memNode) IsDir() bool        { return n.isDir }
 func (n *memNode) Sys() interface{}   { return nil }
 
 type memFile struct {
-	node     *memNode
-	fs       *MemFS
-	offset   int64
-	fullPath string
+	node          *memNode
+	fs            *MemFS
+	offset        int64
+	fullPath      string
+	contentLength int64
 }
 
-func (f *memFile) Close() error               { return nil }
+var memFilePool = sync.Pool{
+	New: func() interface{} {
+		return &memFile{}
+	},
+}
+
+func (f *memFile) Close() error {
+	f.node = nil
+	f.fs = nil
+	memFilePool.Put(f)
+	return nil
+}
 func (f *memFile) Stat() (ObjectInfo, error) { return f.node, nil }
 
 func (f *memFile) Read(p []byte) (n int, err error) {
@@ -224,17 +240,17 @@ func (f *memFile) Read(p []byte) (n int, err error) {
 func (f *memFile) Write(p []byte) (n int, err error) {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
-	if f.offset+int64(len(p)) > int64(len(f.node.data)) {
-		newSize := f.offset + int64(len(p))
+	newSize := f.offset + int64(len(p))
+	if newSize > int64(cap(f.node.data)) {
 		newData := make([]byte, newSize)
 		copy(newData, f.node.data)
 		f.node.data = newData
+	} else {
+		f.node.data = f.node.data[:newSize]
 	}
 	n = copy(f.node.data[f.offset:], p)
 	f.offset += int64(n)
-	if f.offset > f.node.size {
-		f.node.size = f.offset
-	}
+	atomic.StoreInt64(&f.node.size, newSize)
 	return n, nil
 }
 

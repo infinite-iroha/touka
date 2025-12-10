@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/infinite-iroha/touka"
@@ -24,7 +25,7 @@ import (
 // abstracting the underlying storage from the WebDAV protocol logic.
 type FileSystem interface {
 	Mkdir(ctx context.Context, name string, perm os.FileMode) error
-	OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (File, error)
+	OpenFile(c *touka.Context, name string, flag int, perm os.FileMode) (File, error)
 	RemoveAll(ctx context.Context, name string) error
 	Rename(ctx context.Context, oldName, newName string) error
 	Stat(ctx context.Context, name string) (ObjectInfo, error)
@@ -149,6 +150,14 @@ type Response struct {
 	Propstats []Propstat `xml:"DAV: propstat"`
 }
 
+var multistatusPool = sync.Pool{
+	New: func() interface{} {
+		return &Multistatus{
+			Responses: make([]*Response, 0),
+		}
+	},
+}
+
 // Propstat groups properties with their corresponding HTTP status in a
 // single response, indicating success or failure for those properties.
 type Propstat struct {
@@ -257,7 +266,7 @@ func (h *Handler) handleOptions(c *touka.Context) {
 
 func (h *Handler) handleGetHead(c *touka.Context) {
 	path, _ := c.Get("webdav_path")
-	file, err := h.FileSystem.OpenFile(c.Context(), path.(string), os.O_RDONLY, 0)
+	file, err := h.FileSystem.OpenFile(c, path.(string), os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.Status(http.StatusNotFound)
@@ -297,7 +306,7 @@ func (h *Handler) handleDelete(c *touka.Context) {
 	}
 
 	if info.IsDir() {
-		file, err := h.FileSystem.OpenFile(c.Context(), pathStr, os.O_RDONLY, 0)
+		file, err := h.FileSystem.OpenFile(c, pathStr, os.O_RDONLY, 0)
 		if err != nil {
 			c.Status(http.StatusInternalServerError)
 			return
@@ -329,7 +338,7 @@ func (h *Handler) handleDelete(c *touka.Context) {
 
 func (h *Handler) handlePut(c *touka.Context) {
 	path, _ := c.Get("webdav_path")
-	file, err := h.FileSystem.OpenFile(c.Context(), path.(string), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	file, err := h.FileSystem.OpenFile(c, path.(string), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
@@ -452,7 +461,7 @@ func (h *Handler) copy(ctx context.Context, src, dest string) error {
 			return err
 		}
 
-		srcFile, err := h.FileSystem.OpenFile(ctx, src, os.O_RDONLY, 0)
+		srcFile, err := h.FileSystem.OpenFile(&touka.Context{Request: &http.Request{}}, src, os.O_RDONLY, 0)
 		if err != nil {
 			return err
 		}
@@ -471,13 +480,13 @@ func (h *Handler) copy(ctx context.Context, src, dest string) error {
 		return nil
 	}
 
-	srcFile, err := h.FileSystem.OpenFile(ctx, src, os.O_RDONLY, 0)
+	srcFile, err := h.FileSystem.OpenFile(&touka.Context{Request: &http.Request{}}, src, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
 
-	destFile, err := h.FileSystem.OpenFile(ctx, dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	destFile, err := h.FileSystem.OpenFile(&touka.Context{Request: &http.Request{}}, dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
 	if err != nil {
 		return err
 	}
@@ -507,9 +516,11 @@ func (h *Handler) handlePropfind(c *touka.Context) {
 		}
 	}
 
-	ms := &Multistatus{
-		Responses: make([]*Response, 0),
-	}
+	ms := multistatusPool.Get().(*Multistatus)
+	defer func() {
+		ms.Responses = ms.Responses[:0]
+		multistatusPool.Put(ms)
+	}()
 
 	depth := c.GetReqHeader("Depth")
 	if depth == "" {
@@ -525,7 +536,7 @@ func (h *Handler) handlePropfind(c *touka.Context) {
 				return nil
 			}
 
-			file, err := h.FileSystem.OpenFile(c.Context(), p, os.O_RDONLY, 0)
+			file, err := h.FileSystem.OpenFile(c, p, os.O_RDONLY, 0)
 			if err != nil {
 				return err
 			}
