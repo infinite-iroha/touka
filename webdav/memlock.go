@@ -17,6 +17,7 @@ import (
 type MemLock struct {
 	mu    sync.RWMutex
 	locks map[string]*lock
+	stop  chan struct{}
 }
 
 type lock struct {
@@ -30,21 +31,33 @@ type lock struct {
 func NewMemLock() *MemLock {
 	l := &MemLock{
 		locks: make(map[string]*lock),
+		stop:  make(chan struct{}),
 	}
 	go l.cleanup()
 	return l
 }
 
+// Close stops the cleanup goroutine.
+func (l *MemLock) Close() {
+	close(l.stop)
+}
+
 func (l *MemLock) cleanup() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
 	for {
-		time.Sleep(1 * time.Minute)
-		l.mu.Lock()
-		for token, lock := range l.locks {
-			if time.Now().After(lock.expires) {
-				delete(l.locks, token)
+		select {
+		case <-ticker.C:
+			l.mu.Lock()
+			for token, lock := range l.locks {
+				if time.Now().After(lock.expires) {
+					delete(l.locks, token)
+				}
 			}
+			l.mu.Unlock()
+		case <-l.stop:
+			return
 		}
-		l.mu.Unlock()
 	}
 }
 

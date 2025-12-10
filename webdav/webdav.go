@@ -284,7 +284,39 @@ func (h *Handler) handleGetHead(c *touka.Context) {
 
 func (h *Handler) handleDelete(c *touka.Context) {
 	path, _ := c.Get("webdav_path")
-	if err := h.FileSystem.RemoveAll(c.Context(), path.(string)); err != nil {
+	pathStr := path.(string)
+
+	info, err := h.FileSystem.Stat(c.Context(), pathStr)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.Status(http.StatusNotFound)
+		} else {
+			c.Status(http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if info.IsDir() {
+		file, err := h.FileSystem.OpenFile(c.Context(), pathStr, os.O_RDONLY, 0)
+		if err != nil {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+
+		// Check if the directory has any children. Readdir(1) is enough.
+		children, err := file.Readdir(1)
+		if err != nil && err != io.EOF {
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		if len(children) > 0 {
+			c.Status(http.StatusConflict) // 409 Conflict for non-empty collection
+			return
+		}
+	}
+
+	if err := h.FileSystem.RemoveAll(c.Context(), pathStr); err != nil {
 		if os.IsNotExist(err) {
 			c.Status(http.StatusNotFound)
 		} else {
@@ -347,11 +379,13 @@ func (h *Handler) handleCopy(c *touka.Context) {
         overwrite = "T" // Default is to overwrite
     }
 
-    if overwrite == "F" {
-        if _, err := h.FileSystem.Stat(c.Context(), destPath); err == nil {
-            c.Status(http.StatusPreconditionFailed)
-            return
-        }
+    // Check for existence before the operation to determine status code later.
+	_, err = h.FileSystem.Stat(c.Context(), destPath)
+	existed := err == nil
+
+    if overwrite == "F" && existed {
+        c.Status(http.StatusPreconditionFailed)
+        return
     }
 
     if err := h.copy(c.Context(), srcPath.(string), destPath); err != nil {
@@ -359,7 +393,11 @@ func (h *Handler) handleCopy(c *touka.Context) {
         return
     }
 
-    c.Status(http.StatusCreated)
+	if existed {
+		c.Status(http.StatusNoContent)
+	} else {
+		c.Status(http.StatusCreated)
+	}
 }
 
 func (h *Handler) handleMove(c *touka.Context) {
@@ -382,11 +420,13 @@ func (h *Handler) handleMove(c *touka.Context) {
         overwrite = "T" // Default is to overwrite
     }
 
-    if overwrite == "F" {
-        if _, err := h.FileSystem.Stat(c.Context(), destPath); err == nil {
-            c.Status(http.StatusPreconditionFailed)
-            return
-        }
+    // Check for existence before the operation to determine status code later.
+	_, err = h.FileSystem.Stat(c.Context(), destPath)
+	existed := err == nil
+
+    if overwrite == "F" && existed {
+        c.Status(http.StatusPreconditionFailed)
+        return
     }
 
     if err := h.FileSystem.Rename(c.Context(), srcPath.(string), destPath); err != nil {
@@ -394,7 +434,11 @@ func (h *Handler) handleMove(c *touka.Context) {
         return
     }
 
-    c.Status(http.StatusCreated)
+	if existed {
+		c.Status(http.StatusNoContent)
+	} else {
+		c.Status(http.StatusCreated)
+	}
 }
 
 func (h *Handler) copy(ctx context.Context, src, dest string) error {

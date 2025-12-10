@@ -26,18 +26,37 @@ func NewOSFS(rootDir string) (*OSFS, error) {
 }
 
 func (fs *OSFS) resolve(name string) (string, error) {
-	if filepath.IsAbs(name) {
+	if filepath.IsAbs(name) || strings.Contains(name, "..") {
 		return "", os.ErrPermission
 	}
+
 	path := filepath.Join(fs.RootDir, name)
 
-	rel, err := filepath.Rel(fs.RootDir, path)
-	if err != nil {
+	// Evaluate symlinks, but only if the path exists.
+	if _, err := os.Lstat(path); err == nil {
+		path, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", err
+		}
+	} else if !os.IsNotExist(err) {
 		return "", err
+		// For non-existent paths (like for PUT or MKCOL), we can't EvalSymlinks the full path.
+		// Instead, we resolve the parent and ensure it's within the root.
+	} else {
+		parentDir := filepath.Dir(path)
+		if _, err := os.Stat(parentDir); err == nil {
+			parentDir, err = filepath.EvalSymlinks(parentDir)
+			if err != nil {
+				return "", err
+			}
+			path = filepath.Join(parentDir, filepath.Base(path))
+		}
 	}
-	if strings.HasPrefix(rel, "..") {
+
+	if !strings.HasPrefix(path, fs.RootDir) {
 		return "", os.ErrPermission
 	}
+
 	return path, nil
 }
 
