@@ -36,7 +36,13 @@ func (fs *MemFS) findNode(path string) (*memNode, error) {
 	current := fs.root
 	parts := strings.Split(path, "/")
 	for _, part := range parts {
-		if part == "" {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			if current.parent != nil {
+				current = current.parent
+			}
 			continue
 		}
 		if current.children == nil {
@@ -105,6 +111,7 @@ func (fs *MemFS) OpenFile(ctx context.Context, name string, flag int, perm os.Fi
 
 	if flag&os.O_TRUNC != 0 {
 		node.data = nil
+		node.size = 0
 	}
 
 	return &memFile{
@@ -234,14 +241,21 @@ func (f *memFile) Write(p []byte) (n int, err error) {
 func (f *memFile) Seek(offset int64, whence int) (int64, error) {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
+	var newOffset int64
 	switch whence {
-	case 0:
-		f.offset = offset
-	case 1:
-		f.offset += offset
-	case 2:
-		f.offset = int64(len(f.node.data)) + offset
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = f.offset + offset
+	case io.SeekEnd:
+		newOffset = f.node.size + offset
+	default:
+		return 0, os.ErrInvalid
 	}
+	if newOffset < 0 {
+		return 0, os.ErrInvalid
+	}
+	f.offset = newOffset
 	return f.offset, nil
 }
 

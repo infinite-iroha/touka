@@ -585,11 +585,11 @@ func (h *Handler) handleProppatch(c *touka.Context) {
 	c.Status(http.StatusNotImplemented)
 }
 
-func (h *Handler) stripPrefix(path string) string {
+func (h *Handler) stripPrefix(p string) string {
 	if h.Prefix == "/" {
-		return path
+		return p
 	}
-	return "/" + strings.TrimPrefix(path, h.Prefix)
+	return strings.TrimPrefix(p, h.Prefix)
 }
 
 func (h *Handler) handleLock(c *touka.Context) {
@@ -599,7 +599,15 @@ func (h *Handler) handleLock(c *touka.Context) {
 	}
 
 	path, _ := c.Get("webdav_path")
-	token := c.GetReqHeader("If")
+	tokenHeader := c.GetReqHeader("If")
+	var token string
+	if tokenHeader != "" {
+		// Basic parsing for <opaquelocktoken:c2134f...>
+		if strings.HasPrefix(tokenHeader, "(<") && strings.HasSuffix(tokenHeader, ">)") {
+			token = strings.TrimPrefix(tokenHeader, "(<")
+			token = strings.TrimSuffix(token, ">)")
+		}
+	}
 
 	// Refresh lock
 	if token != "" {
@@ -666,7 +674,7 @@ func parseTimeout(timeoutStr string) (time.Duration, error) {
 			return seconds, nil
 		}
 	}
-	return 0, nil
+	return 0, os.ErrInvalid
 }
 
 func (h *Handler) handleUnlock(c *touka.Context) {
@@ -675,11 +683,15 @@ func (h *Handler) handleUnlock(c *touka.Context) {
 		return
 	}
 
-	token := c.GetReqHeader("Lock-Token")
-	if token == "" {
+	tokenHeader := c.GetReqHeader("Lock-Token")
+	if tokenHeader == "" {
 		c.Status(http.StatusBadRequest)
 		return
 	}
+
+	// Basic parsing for <urn:uuid:f81d4fae...>
+	token := strings.TrimPrefix(tokenHeader, "<")
+	token = strings.TrimSuffix(token, ">")
 
 	if err := h.LockSystem.Unlock(c.Context(), token); err != nil {
 		c.Status(http.StatusConflict)

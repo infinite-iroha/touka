@@ -26,8 +26,16 @@ func NewOSFS(rootDir string) (*OSFS, error) {
 }
 
 func (fs *OSFS) resolve(name string) (string, error) {
+	if filepath.IsAbs(name) {
+		return "", os.ErrPermission
+	}
 	path := filepath.Join(fs.RootDir, name)
-	if !strings.HasPrefix(path, fs.RootDir) {
+
+	rel, err := filepath.Rel(fs.RootDir, path)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") {
 		return "", os.ErrPermission
 	}
 	return path, nil

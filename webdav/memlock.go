@@ -28,8 +28,23 @@ type lock struct {
 
 // NewMemLock creates a new in-memory lock system.
 func NewMemLock() *MemLock {
-	return &MemLock{
+	l := &MemLock{
 		locks: make(map[string]*lock),
+	}
+	go l.cleanup()
+	return l
+}
+
+func (l *MemLock) cleanup() {
+	for {
+		time.Sleep(1 * time.Minute)
+		l.mu.Lock()
+		for token, lock := range l.locks {
+			if time.Now().After(lock.expires) {
+				delete(l.locks, token)
+			}
+		}
+		l.mu.Unlock()
 	}
 }
 
@@ -39,7 +54,9 @@ func (l *MemLock) Create(ctx context.Context, path string, info LockInfo) (strin
 	defer l.mu.Unlock()
 
 	token := make([]byte, 16)
-	rand.Read(token)
+	if _, err := rand.Read(token); err != nil {
+		return "", err
+	}
 	tokenStr := hex.EncodeToString(token)
 
 	l.locks[tokenStr] = &lock{
