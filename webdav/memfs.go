@@ -131,15 +131,34 @@ func (fs *MemFS) RemoveAll(ctx context.Context, name string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	dir, base := path.Split(name)
+	cleanPath := path.Clean(name)
+	if cleanPath == "/" {
+		return os.ErrInvalid
+	}
+
+	dir, base := path.Split(cleanPath)
 	parent, err := fs.findNode(dir)
 	if err != nil {
 		return err
 	}
 
-	if _, exists := parent.children[base]; !exists {
+	node, exists := parent.children[base]
+	if !exists {
 		return os.ErrNotExist
 	}
+
+	var recursiveDelete func(*memNode)
+	recursiveDelete = func(n *memNode) {
+		if n.isDir {
+			for _, child := range n.children {
+				recursiveDelete(child)
+			}
+		}
+		n.parent = nil
+		n.children = nil
+		n.data = nil
+	}
+	recursiveDelete(node)
 
 	delete(parent.children, base)
 	return nil
@@ -240,17 +259,34 @@ func (f *memFile) Read(p []byte) (n int, err error) {
 func (f *memFile) Write(p []byte) (n int, err error) {
 	f.fs.mu.Lock()
 	defer f.fs.mu.Unlock()
-	newSize := f.offset + int64(len(p))
-	if newSize > int64(cap(f.node.data)) {
-		newData := make([]byte, newSize)
+
+	writeEnd := f.offset + int64(len(p))
+
+	// Grow slice if necessary
+	if writeEnd > int64(cap(f.node.data)) {
+		newCap := int64(cap(f.node.data)) * 2
+		if newCap < writeEnd {
+			newCap = writeEnd
+		}
+		newData := make([]byte, len(f.node.data), newCap)
 		copy(newData, f.node.data)
 		f.node.data = newData
-	} else {
-		f.node.data = f.node.data[:newSize]
 	}
+
+	// Extend slice length if write goes past the end
+	if writeEnd > int64(len(f.node.data)) {
+		f.node.data = f.node.data[:writeEnd]
+	}
+
 	n = copy(f.node.data[f.offset:], p)
 	f.offset += int64(n)
-	atomic.StoreInt64(&f.node.size, newSize)
+
+	// Update size only if the file has grown
+	if f.offset > atomic.LoadInt64(&f.node.size) {
+		atomic.StoreInt64(&f.node.size, f.offset)
+	}
+	f.node.modTime = time.Now()
+
 	return n, nil
 }
 

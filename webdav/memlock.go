@@ -67,6 +67,13 @@ func (l *MemLock) Create(ctx context.Context, path string, info LockInfo) (strin
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Check for conflicting locks
+	for _, v := range l.locks {
+		if v.path == path {
+			return "", os.ErrExist
+		}
+	}
+
 	token := make([]byte, 16)
 	if _, err := rand.Read(token); err != nil {
 		return "", err
