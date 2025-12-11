@@ -55,7 +55,11 @@ func (fs *OSFS) resolve(name string) (string, error) {
 		}
 	}
 
-	if !strings.HasPrefix(path, fs.RootDir) {
+	rel, err := filepath.Rel(fs.RootDir, path)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") {
 		return "", os.ErrPermission
 	}
 

@@ -67,6 +67,8 @@ var (
 	MethodMkcol     = "MKCOL"
 	MethodCopy      = "COPY"
 	MethodMove      = "MOVE"
+	MethodLock      = "LOCK"
+	MethodUnlock    = "UNLOCK"
 )
 
 var MethodsSet = map[string]struct{}{
@@ -84,4 +86,6 @@ var MethodsSet = map[string]struct{}{
 	MethodMkcol:     {},
 	MethodCopy:      {},
 	MethodMove:      {},
+	MethodLock:      {},
+	MethodUnlock:    {},
 }

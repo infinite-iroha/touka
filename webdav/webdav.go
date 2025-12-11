@@ -397,7 +397,7 @@ func (h *Handler) handleCopy(c *touka.Context) {
         return
     }
 
-    if err := h.copy(c.Context(), srcPath.(string), destPath); err != nil {
+    if err := h.copy(c, srcPath.(string), destPath); err != nil {
         c.Status(http.StatusInternalServerError)
         return
     }
@@ -450,18 +450,18 @@ func (h *Handler) handleMove(c *touka.Context) {
 	}
 }
 
-func (h *Handler) copy(ctx context.Context, src, dest string) error {
-	info, err := h.FileSystem.Stat(ctx, src)
+func (h *Handler) copy(c *touka.Context, src, dest string) error {
+	info, err := h.FileSystem.Stat(c.Context(), src)
 	if err != nil {
 		return err
 	}
 
 	if info.IsDir() {
-		if err := h.FileSystem.Mkdir(ctx, dest, info.Mode()); err != nil {
+		if err := h.FileSystem.Mkdir(c.Context(), dest, info.Mode()); err != nil {
 			return err
 		}
 
-		srcFile, err := h.FileSystem.OpenFile(&touka.Context{Request: &http.Request{}}, src, os.O_RDONLY, 0)
+		srcFile, err := h.FileSystem.OpenFile(c, src, os.O_RDONLY, 0)
 		if err != nil {
 			return err
 		}
@@ -473,20 +473,20 @@ func (h *Handler) copy(ctx context.Context, src, dest string) error {
 		}
 
 		for _, child := range children {
-			if err := h.copy(ctx, path.Join(src, child.Name()), path.Join(dest, child.Name())); err != nil {
+			if err := h.copy(c, path.Join(src, child.Name()), path.Join(dest, child.Name())); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	srcFile, err := h.FileSystem.OpenFile(&touka.Context{Request: &http.Request{}}, src, os.O_RDONLY, 0)
+	srcFile, err := h.FileSystem.OpenFile(c, src, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
 
-	destFile, err := h.FileSystem.OpenFile(&touka.Context{Request: &http.Request{}}, dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	destFile, err := h.FileSystem.OpenFile(c, dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
 	if err != nil {
 		return err
 	}
