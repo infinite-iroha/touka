@@ -18,9 +18,11 @@ func main() {
 	}
 
 	// Serve the "public" directory on the "/webdav/" route.
-	if err := webdav.Serve(r, "/webdav", "public"); err != nil {
+	closer, err := webdav.Serve(r, "/webdav", "public")
+	if err != nil {
 		log.Fatal(err)
 	}
+	defer closer.Close()
 
 	log.Println("Touka WebDAV Server starting on :8080...")
 	if err := r.RunShutdown(":8080", 10*time.Second); err != nil {

@@ -588,11 +588,8 @@ func (h *Handler) handlePropfind(c *touka.Context) {
 }
 
 
-func (h *Handler) createPropfindResponse(path string, info ObjectInfo, propfind Propfind) *Response {
-	fullPath := path
-	if h.Prefix != "/" {
-		fullPath = h.Prefix + path
-	}
+func (h *Handler) createPropfindResponse(p string, info ObjectInfo, propfind Propfind) *Response {
+	fullPath := path.Join(h.Prefix, p)
 
 	resp := &Response{
 		Href:      []string{fullPath},
@@ -641,10 +638,7 @@ func (h *Handler) handleProppatch(c *touka.Context) {
 }
 
 func (h *Handler) stripPrefix(p string) string {
-	if h.Prefix == "/" {
-		return p
-	}
-	return strings.TrimPrefix(p, h.Prefix)
+	return strings.TrimPrefix(strings.TrimPrefix(p, h.Prefix), "/")
 }
 
 func (h *Handler) handleLock(c *touka.Context) {

@@ -28,7 +28,7 @@ func NewOSFS(rootDir string) (*OSFS, error) {
 }
 
 func (fs *OSFS) resolve(name string) (string, error) {
-	if filepath.IsAbs(name) || strings.Contains(name, "..") {
+	if strings.Contains(name, "..") {
 		return "", os.ErrPermission
 	}
 

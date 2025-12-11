@@ -38,8 +38,9 @@ func NewMemLock() *MemLock {
 }
 
 // Close stops the cleanup goroutine.
-func (l *MemLock) Close() {
+func (l *MemLock) Close() error {
 	close(l.stop)
+	return nil
 }
 
 func (l *MemLock) cleanup() {

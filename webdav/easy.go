@@ -5,6 +5,7 @@
 package webdav
 
 import (
+	"io"
 	"log"
 	"os"
 
@@ -20,10 +21,6 @@ type Config struct {
 
 // Register registers a WebDAV handler on the given router.
 func Register(engine *touka.Engine, prefix string, cfg *Config) {
-	if cfg.LockSystem == nil {
-		cfg.LockSystem = NewMemLock()
-	}
-
 	handler := NewHandler(prefix, cfg.FileSystem, cfg.LockSystem, cfg.Logger)
 
 	webdavMethods := []string{
@@ -33,16 +30,18 @@ func Register(engine *touka.Engine, prefix string, cfg *Config) {
 }
 
 // Serve serves a local directory via WebDAV.
-func Serve(engine *touka.Engine, prefix string, rootDir string) error {
+func Serve(engine *touka.Engine, prefix string, rootDir string) (io.Closer, error) {
 	fs, err := NewOSFS(rootDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	ls := NewMemLock()
 	cfg := &Config{
 		FileSystem: fs,
+		LockSystem: ls,
 		Logger:     log.New(os.Stdout, "", 0),
 	}
 	Register(engine, prefix, cfg)
-	return nil
+	return ls, nil
 }

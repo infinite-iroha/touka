@@ -17,6 +17,7 @@ func TestRegister(t *testing.T) {
 	r := touka.New()
 	cfg := &Config{
 		FileSystem: NewMemFS(),
+		LockSystem: NewMemLock(),
 	}
 	Register(r, "/dav", cfg)
 
@@ -35,9 +36,11 @@ func TestServe(t *testing.T) {
 	dir, _ := os.MkdirTemp("", "webdav")
 	defer os.RemoveAll(dir)
 
-	if err := Serve(r, "/serve", dir); err != nil {
+	closer, err := Serve(r, "/serve", dir)
+	if err != nil {
 		t.Fatalf("Serve failed: %v", err)
 	}
+	defer closer.Close()
 
 	// Check if a WebDAV method is registered
 	req, _ := http.NewRequest("OPTIONS", "/serve/", nil)
