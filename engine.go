@@ -421,19 +421,38 @@ func getHandlerName(h HandlerFunc) string {
 
 }
 
-// TempSkippedNodes池
+const MaxSkippedNodesCap = 256
+
+// TempSkippedNodesPool 存储 *[]skippedNode 以复用内存
 var TempSkippedNodesPool = sync.Pool{
 	New: func() any {
-		return make([]skippedNode, 0, 256)
+		// 返回一个指向容量为 256 的新切片的指针
+		s := make([]skippedNode, 0, MaxSkippedNodesCap)
+		return &s
 	},
 }
 
+// GetTempSkippedNodes 从 Pool 中获取一个 *[]skippedNode 指针
 func GetTempSkippedNodes() *[]skippedNode {
+	// 直接返回 Pool 中存储的指针
 	return TempSkippedNodesPool.Get().(*[]skippedNode)
 }
 
+// PutTempSkippedNodes 将用完的 *[]skippedNode 指针放回 Pool
 func PutTempSkippedNodes(skippedNodes *[]skippedNode) {
-	*skippedNodes = (*skippedNodes)[:0] // 重置slice
+	if skippedNodes == nil || *skippedNodes == nil {
+		return
+	}
+
+	// 检查容量是否符合预期。如果容量不足，则丢弃，不放回 Pool。
+	if cap(*skippedNodes) < MaxSkippedNodesCap {
+		return // 丢弃该对象，让 Pool 在下次 Get 时通过 New 重新分配
+	}
+
+	// 长度重置为 0，保留容量，实现复用
+	*skippedNodes = (*skippedNodes)[:0]
+
+	// 将指针存回 Pool
 	TempSkippedNodesPool.Put(skippedNodes)
 }
 
