@@ -89,7 +89,7 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	if cap(c.Params) > 0 {
 		c.Params = c.Params[:0]
 	} else {
-		c.Params = make(Params, 0, 5)
+		c.Params = make(Params, 0, c.engine.maxParams)
 	}
 	c.handlers = nil
 	c.index = -1                          // 初始为 -1，`Next()` 将其设置为 0

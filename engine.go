@@ -421,6 +421,22 @@ func getHandlerName(h HandlerFunc) string {
 
 }
 
+// TempSkippedNodes池
+var TempSkippedNodesPool = sync.Pool{
+	New: func() any {
+		return make([]skippedNode, 0, 256)
+	},
+}
+
+func GetTempSkippedNodes() *[]skippedNode {
+	return TempSkippedNodesPool.Get().(*[]skippedNode)
+}
+
+func PutTempSkippedNodes(skippedNodes *[]skippedNode) {
+	*skippedNodes = (*skippedNodes)[:0] // 重置slice
+	TempSkippedNodesPool.Put(skippedNodes)
+}
+
 // 405中间件
 func MethodNotAllowed() HandlerFunc {
 	return func(c *Context) {
@@ -433,7 +449,9 @@ func MethodNotAllowed() HandlerFunc {
 			allowedMethods := []string{}
 			for _, treeIter := range engine.methodTrees {
 				// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-				value := treeIter.root.getValue(requestPath, nil, &c.SkippedNodes, false)
+				tempSkippedNodes := GetTempSkippedNodes()
+				value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
+				PutTempSkippedNodes(tempSkippedNodes)
 				if value.handlers != nil {
 					allowedMethods = append(allowedMethods, treeIter.method)
 				}
@@ -451,7 +469,9 @@ func MethodNotAllowed() HandlerFunc {
 				continue
 			}
 			// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-			value := treeIter.root.getValue(requestPath, nil, &c.SkippedNodes, false) // 只查找是否存在,不需要参数
+			tempSkippedNodes := GetTempSkippedNodes()
+			value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
+			PutTempSkippedNodes(tempSkippedNodes)
 			if value.handlers != nil {
 				// 使用定义的ErrorHandle处理
 				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
