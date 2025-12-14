@@ -421,6 +421,41 @@ func getHandlerName(h HandlerFunc) string {
 
 }
 
+const MaxSkippedNodesCap = 256
+
+// TempSkippedNodesPool 存储 *[]skippedNode 以复用内存
+var TempSkippedNodesPool = sync.Pool{
+	New: func() any {
+		// 返回一个指向容量为 256 的新切片的指针
+		s := make([]skippedNode, 0, MaxSkippedNodesCap)
+		return &s
+	},
+}
+
+// GetTempSkippedNodes 从 Pool 中获取一个 *[]skippedNode 指针
+func GetTempSkippedNodes() *[]skippedNode {
+	// 直接返回 Pool 中存储的指针
+	return TempSkippedNodesPool.Get().(*[]skippedNode)
+}
+
+// PutTempSkippedNodes 将用完的 *[]skippedNode 指针放回 Pool
+func PutTempSkippedNodes(skippedNodes *[]skippedNode) {
+	if skippedNodes == nil || *skippedNodes == nil {
+		return
+	}
+
+	// 检查容量是否符合预期。如果容量不足，则丢弃，不放回 Pool。
+	if cap(*skippedNodes) < MaxSkippedNodesCap {
+		return // 丢弃该对象，让 Pool 在下次 Get 时通过 New 重新分配
+	}
+
+	// 长度重置为 0，保留容量，实现复用
+	*skippedNodes = (*skippedNodes)[:0]
+
+	// 将指针存回 Pool
+	TempSkippedNodesPool.Put(skippedNodes)
+}
+
 // 405中间件
 func MethodNotAllowed() HandlerFunc {
 	return func(c *Context) {
@@ -432,9 +467,10 @@ func MethodNotAllowed() HandlerFunc {
 			// 如果是 OPTIONS 请求,尝试查找所有允许的方法
 			allowedMethods := []string{}
 			for _, treeIter := range engine.methodTrees {
-				var tempSkippedNodes []skippedNode
 				// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-				value := treeIter.root.getValue(requestPath, nil, &tempSkippedNodes, false)
+				tempSkippedNodes := GetTempSkippedNodes()
+				value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
+				PutTempSkippedNodes(tempSkippedNodes)
 				if value.handlers != nil {
 					allowedMethods = append(allowedMethods, treeIter.method)
 				}
@@ -451,9 +487,10 @@ func MethodNotAllowed() HandlerFunc {
 			if treeIter.method == httpMethod { // 已经处理过当前方法,跳过
 				continue
 			}
-			var tempSkippedNodes []skippedNode // 用于临时查找,不影响主 Context
 			// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-			value := treeIter.root.getValue(requestPath, nil, &tempSkippedNodes, false) // 只查找是否存在,不需要参数
+			tempSkippedNodes := GetTempSkippedNodes()
+			value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
+			PutTempSkippedNodes(tempSkippedNodes)
 			if value.handlers != nil {
 				// 使用定义的ErrorHandle处理
 				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -661,9 +698,8 @@ func (engine *Engine) handleRequest(c *Context) {
 		// 查找匹配的节点和处理函数
 		// 这里传递 &c.Params 而不是重新创建,以利用 Context 中预分配的容量
 		// skippedNodes 内部使用,因此无需从外部传入已分配的 slice
-		var skippedNodes []skippedNode // 用于回溯的跳过节点
 		// 直接在 rootNode 上调用 getValue 方法
-		value := rootNode.getValue(requestPath, &c.Params, &skippedNodes, true) // unescape=true 对路径参数进行 URL 解码
+		value := rootNode.getValue(requestPath, &c.Params, &c.SkippedNodes, true) // unescape=true 对路径参数进行 URL 解码
 
 		if value.handlers != nil {
 			//c.handlers = engine.combineHandlers(engine.globalHandlers, value.handlers) // 组合全局中间件和路由处理函数
