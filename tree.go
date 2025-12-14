@@ -5,7 +5,6 @@
 package touka
 
 import (
-	"bytes"
 	"net/url"
 	"strings"
 	"unicode"
@@ -26,12 +25,6 @@ func StringToBytes(s string) []byte {
 func BytesToString(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
-
-var (
-	strColon = []byte(":") // 定义字节切片常量, 表示冒号, 用于路径参数识别
-	strStar  = []byte("*") // 定义字节切片常量, 表示星号, 用于捕获所有路径识别
-	strSlash = []byte("/") // 定义字节切片常量, 表示斜杠, 用于路径分隔符识别
-)
 
 // Param 是单个 URL 参数, 由键和值组成.
 type Param struct {
@@ -106,17 +99,14 @@ func (n *node) addChild(child *node) {
 
 // countParams 计算路径中参数(冒号)和捕获所有(星号)的数量.
 func countParams(path string) uint16 {
-	var n uint16
-	s := StringToBytes(path)              // 将路径字符串转换为字节切片
-	n += uint16(bytes.Count(s, strColon)) // 统计冒号的数量
-	n += uint16(bytes.Count(s, strStar))  // 统计星号的数量
-	return n
+	colons := strings.Count(path, ":")
+	stars := strings.Count(path, "*")
+	return uint16(colons + stars)
 }
 
 // countSections 计算路径中斜杠('/')的数量, 即路径段的数量.
 func countSections(path string) uint16 {
-	s := StringToBytes(path)                // 将路径字符串转换为字节切片
-	return uint16(bytes.Count(s, strSlash)) // 统计斜杠的数量
+	return uint16(strings.Count(path, "/"))
 }
 
 // nodeType 定义了节点的类型.
@@ -418,10 +408,10 @@ func (n *node) insertChild(path string, fullPath string, handlers HandlersChain)
 			fullPath:  fullPath, // 设置完整路径
 		}
 
-		n.addChild(child)       // 添加子节点
-		n.indices = string('/') // 索引设置为 '/'
-		n = child               // 移动到新创建的 catchAll 节点
-		n.priority++            // 增加优先级
+		n.addChild(child) // 添加子节点
+		n.indices = "/"   // 索引设置为 '/'
+		n = child         // 移动到新创建的 catchAll 节点
+		n.priority++      // 增加优先级
 
 		// 第二个节点: 包含变量的节点
 		child = &node{

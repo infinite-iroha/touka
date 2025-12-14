@@ -65,6 +65,10 @@ type Context struct {
 
 	// 请求体Body大小限制
 	MaxRequestBodySize int64
+
+	// skippedNodes 用于记录跳过的节点信息，以便回溯
+	// 通常在处理嵌套路由时使用
+	SkippedNodes []skippedNode
 }
 
 // --- Context 相关方法实现 ---
@@ -80,7 +84,13 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	}
 
 	c.Request = req
-	c.Params = c.Params[:0] // 清空 Params 切片，而不是重新分配，以复用底层数组
+	//c.Params = c.Params[:0] // 清空 Params 切片，而不是重新分配，以复用底层数组
+	//避免params长度为0
+	if cap(c.Params) > 0 {
+		c.Params = c.Params[:0]
+	} else {
+		c.Params = make(Params, 0, 5)
+	}
 	c.handlers = nil
 	c.index = -1                          // 初始为 -1，`Next()` 将其设置为 0
 	c.Keys = make(map[string]any)         // 每次请求重新创建 map，避免数据污染
@@ -90,6 +100,12 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	c.ctx = req.Context()                 // 使用请求的上下文，继承其取消信号和值
 	c.sameSite = http.SameSiteDefaultMode // 默认 SameSite 模式
 	c.MaxRequestBodySize = c.engine.GlobalMaxRequestBodySize
+
+	if cap(c.SkippedNodes) > 0 {
+		c.SkippedNodes = c.SkippedNodes[:0]
+	} else {
+		c.SkippedNodes = make([]skippedNode, 0, 256)
+	}
 }
 
 // Next 在处理链中执行下一个处理函数
