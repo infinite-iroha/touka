@@ -410,6 +410,7 @@ func (c *Context) JSON(code int, obj any) {
 	c.Writer.WriteHeader(code)
 	if err := json.MarshalWrite(c.Writer, obj); err != nil {
 		c.AddError(fmt.Errorf("failed to marshal JSON: %w", err))
+		c.Errorf("failed to marshal JSON: %s", err)
 		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to marshal JSON: %w", err))
 		return
 	}
