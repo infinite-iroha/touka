@@ -12,7 +12,7 @@ const (
 	defaultMemory = 32 << 20 // 32 MB, Gin 的默认值，用于 ParseMultipartForm
 )
 
-type H map[string]interface{} // map简写, 类似gin.H
+type H map[string]any // map简写, 类似gin.H
 
 type Handle func(http.ResponseWriter, *http.Request, Params)
 

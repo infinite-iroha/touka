@@ -51,7 +51,7 @@ type Engine struct {
 
 	LogReco *reco.Logger
 
-	HTMLRender interface{} // 用于 HTML 模板渲染,可以设置为 *template.Template 或自定义渲染器接口
+	HTMLRender any // 用于 HTML 模板渲染,可以设置为 *template.Template 或自定义渲染器接口
 
 	routesInfo []RouteInfo // 存储所有注册的路由信息
 
@@ -211,11 +211,11 @@ func New() *Engine {
 	engine.SetDefaultProtocols()
 	engine.SetLoggerCfg(defaultLogRecoConfig)
 	// 初始化 Context Pool,为每个新 Context 实例提供一个构造函数
-	engine.pool.New = func() interface{} {
+	engine.pool.New = func() any {
 		return &Context{
 			Writer:     newResponseWriter(nil),            // 初始时可以传入nil,在ServeHTTP中会重新设置实际的 http.ResponseWriter
 			Params:     make(Params, 0, engine.maxParams), // 预分配 Params 切片以减少内存分配
-			Keys:       make(map[string]interface{}),
+			Keys:       make(map[string]any),
 			Errors:     make([]error, 0),
 			ctx:        context.Background(), // 初始上下文,后续会被请求的 Context 覆盖
 			HTTPClient: engine.HTTPClient,

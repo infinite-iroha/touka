@@ -286,7 +286,7 @@ func (c *Context) Raw(code int, contentType string, data []byte) {
 // String 向响应写入格式化的字符串
 func (c *Context) String(code int, format string, values ...any) {
 	c.Writer.WriteHeader(code)
-	c.Writer.Write([]byte(fmt.Sprintf(format, values...)))
+	c.Writer.Write(fmt.Appendf(nil, format, values...))
 }
 
 // Text 向响应写入无需格式化的string
@@ -465,7 +465,7 @@ func (c *Context) HTML(code int, name string, obj any) {
 		// 可以扩展支持其他渲染器接口
 	}
 	// 默认简单输出，用于未配置 HTMLRender 的情况
-	c.Writer.Write([]byte(fmt.Sprintf("<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj)))
+	c.Writer.Write(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj))
 }
 
 // Redirect 执行 HTTP 重定向

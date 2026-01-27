@@ -18,7 +18,7 @@ import (
 
 // PanicHandlerFunc 定义了用户自定义的 panic 处理函数类型
 // 它接收当前的 Context 和 panic 的值
-type PanicHandlerFunc func(c *Context, panicInfo interface{})
+type PanicHandlerFunc func(c *Context, panicInfo any)
 
 // RecoveryWithOptions 返回一个可配置的 panic 恢复中间件
 //
@@ -50,7 +50,7 @@ func Recovery() HandlerFunc {
 }
 
 // defaultPanicHandler 是默认的 panic 处理逻辑
-func defaultPanicHandler(c *Context, r interface{}) {
+func defaultPanicHandler(c *Context, r any) {
 	// 检查连接是否已由客户端关闭
 	// 常见的错误类型包括 net.OpError (其内部错误可能是 os.SyscallError)，
 	// 以及在 HTTP/2 中可能出现的特定 stream 错误
@@ -107,7 +107,7 @@ func defaultPanicHandler(c *Context, r interface{}) {
 
 // isBrokenPipeError 检查 recover() 捕获的值是否表示一个由客户端断开连接引起的网络错误
 // 这对于防止在已关闭的连接上写入响应至关重要
-func isBrokenPipeError(r interface{}) bool {
+func isBrokenPipeError(r any) bool {
 	// 将 recover() 的结果转换为 error 类型
 	err, ok := r.(error)
 	if !ok {
