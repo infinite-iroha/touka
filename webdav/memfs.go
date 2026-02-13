@@ -1,0 +1,329 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Copyright 2024 WJQSERVER. All rights reserved// All rights reserved by WJQSERVER, related rights can be exercised by the infinite-iroha organization.
+package webdav
+
+import (
+	"context"
+	"io"
+	"os"
+	"path"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/infinite-iroha/touka"
+)
+
+// MemFS is an in-memory file system for WebDAV using a tree structure.
+type MemFS struct {
+	mu   sync.RWMutex
+	root *memNode
+}
+
+// NewMemFS creates a new in-memory file system.
+func NewMemFS() *MemFS {
+	return &MemFS{
+		root: &memNode{
+			name:     "/",
+			isDir:    true,
+			modTime:  time.Now(),
+			children: make(map[string]*memNode),
+		},
+	}
+}
+
+// findNode traverses the tree to find a node by path.
+func (fs *MemFS) findNode(path string) (*memNode, error) {
+	current := fs.root
+	parts := strings.Split(path, "/")
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			if current.parent != nil {
+				current = current.parent
+			}
+			continue
+		}
+		if current.children == nil {
+			return nil, os.ErrNotExist
+		}
+		child, ok := current.children[part]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		current = child
+	}
+	return current, nil
+}
+
+// Mkdir creates a directory in the in-memory file system.
+func (fs *MemFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	dir, base := path.Split(name)
+	parent, err := fs.findNode(dir)
+	if err != nil {
+		return err
+	}
+
+	if _, exists := parent.children[base]; exists {
+		return os.ErrExist
+	}
+
+	newNode := &memNode{
+		name:     base,
+		isDir:    true,
+		modTime:  time.Now(),
+		mode:     perm,
+		parent:   parent,
+		children: make(map[string]*memNode),
+	}
+	parent.children[base] = newNode
+	return nil
+}
+
+// OpenFile opens a file in the in-memory file system.
+func (fs *MemFS) OpenFile(c *touka.Context, name string, flag int, perm os.FileMode) (File, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	dir, base := path.Split(name)
+	parent, err := fs.findNode(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	node, exists := parent.children[base]
+	if !exists {
+		if flag&os.O_CREATE == 0 {
+			return nil, os.ErrNotExist
+		}
+		node = &memNode{
+			name:    base,
+			modTime: time.Now(),
+			mode:    perm,
+			parent:  parent,
+		}
+		parent.children[base] = node
+	}
+
+	if flag&os.O_TRUNC != 0 {
+		node.data = nil
+		atomic.StoreInt64(&node.size, 0)
+	}
+
+	mf := memFilePool.Get().(*memFile)
+	mf.node = node
+	mf.fs = fs
+	mf.offset = 0
+	mf.fullPath = name
+	mf.contentLength = c.Request.ContentLength
+	return mf, nil
+}
+
+// RemoveAll removes a file or directory from the in-memory file system.
+func (fs *MemFS) RemoveAll(ctx context.Context, name string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	cleanPath := path.Clean(name)
+	if cleanPath == "/" {
+		return os.ErrInvalid
+	}
+
+	dir, base := path.Split(cleanPath)
+	parent, err := fs.findNode(dir)
+	if err != nil {
+		return err
+	}
+
+	node, exists := parent.children[base]
+	if !exists {
+		return os.ErrNotExist
+	}
+
+	var recursiveDelete func(*memNode)
+	recursiveDelete = func(n *memNode) {
+		if n.isDir {
+			for _, child := range n.children {
+				recursiveDelete(child)
+			}
+		}
+		n.parent = nil
+		n.children = nil
+		n.data = nil
+	}
+	recursiveDelete(node)
+
+	delete(parent.children, base)
+	return nil
+}
+
+// Rename renames a file in the in-memory file system.
+func (fs *MemFS) Rename(ctx context.Context, oldName, newName string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	oldDir, oldBase := path.Split(oldName)
+	newDir, newBase := path.Split(newName)
+
+	oldParent, err := fs.findNode(oldDir)
+	if err != nil {
+		return err
+	}
+
+	node, exists := oldParent.children[oldBase]
+	if !exists {
+		return os.ErrNotExist
+	}
+
+	newParent, err := fs.findNode(newDir)
+	if err != nil {
+		return err
+	}
+
+	if _, exists := newParent.children[newBase]; exists {
+		return os.ErrExist
+	}
+
+	delete(oldParent.children, oldBase)
+	node.name = newBase
+	node.parent = newParent
+	newParent.children[newBase] = node
+	return nil
+}
+
+// Stat returns the file info for a file or directory.
+func (fs *MemFS) Stat(ctx context.Context, name string) (ObjectInfo, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	return fs.findNode(name)
+}
+
+type memNode struct {
+	name     string
+	isDir    bool
+	size     int64
+	modTime  time.Time
+	mode     os.FileMode
+	data     []byte
+	parent   *memNode
+	children map[string]*memNode
+}
+
+func (n *memNode) Name() string       { return n.name }
+func (n *memNode) Size() int64        { return atomic.LoadInt64(&n.size) }
+func (n *memNode) Mode() os.FileMode  { return n.mode }
+func (n *memNode) ModTime() time.Time { return n.modTime }
+func (n *memNode) IsDir() bool        { return n.isDir }
+func (n *memNode) Sys() interface{}   { return nil }
+
+type memFile struct {
+	node          *memNode
+	fs            *MemFS
+	offset        int64
+	fullPath      string
+	contentLength int64
+}
+
+var memFilePool = sync.Pool{
+	New: func() interface{} {
+		return &memFile{}
+	},
+}
+
+func (f *memFile) Close() error {
+	f.node = nil
+	f.fs = nil
+	memFilePool.Put(f)
+	return nil
+}
+func (f *memFile) Stat() (ObjectInfo, error) { return f.node, nil }
+
+func (f *memFile) Read(p []byte) (n int, err error) {
+	f.fs.mu.RLock()
+	defer f.fs.mu.RUnlock()
+	if f.offset >= int64(len(f.node.data)) {
+		return 0, io.EOF
+	}
+	n = copy(p, f.node.data[f.offset:])
+	f.offset += int64(n)
+	return n, nil
+}
+
+func (f *memFile) Write(p []byte) (n int, err error) {
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
+
+	writeEnd := f.offset + int64(len(p))
+
+	// Grow slice if necessary
+	if writeEnd > int64(cap(f.node.data)) {
+		newCap := int64(cap(f.node.data)) * 2
+		if newCap < writeEnd {
+			newCap = writeEnd
+		}
+		newData := make([]byte, len(f.node.data), newCap)
+		copy(newData, f.node.data)
+		f.node.data = newData
+	}
+
+	// Extend slice length if write goes past the end
+	if writeEnd > int64(len(f.node.data)) {
+		f.node.data = f.node.data[:writeEnd]
+	}
+
+	n = copy(f.node.data[f.offset:], p)
+	f.offset += int64(n)
+
+	// Update size only if the file has grown
+	if f.offset > atomic.LoadInt64(&f.node.size) {
+		atomic.StoreInt64(&f.node.size, f.offset)
+	}
+	f.node.modTime = time.Now()
+
+	return n, nil
+}
+
+func (f *memFile) Seek(offset int64, whence int) (int64, error) {
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
+	var newOffset int64
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = f.offset + offset
+	case io.SeekEnd:
+		newOffset = f.node.size + offset
+	default:
+		return 0, os.ErrInvalid
+	}
+	if newOffset < 0 {
+		return 0, os.ErrInvalid
+	}
+	f.offset = newOffset
+	return f.offset, nil
+}
+
+// Readdir reads the contents of the directory associated with file and returns
+// a slice of up to n FileInfo values, as would be returned by Lstat.
+func (f *memFile) Readdir(count int) ([]ObjectInfo, error) {
+	f.fs.mu.RLock()
+	defer f.fs.mu.RUnlock()
+
+	if !f.node.isDir {
+		return nil, os.ErrInvalid
+	}
+
+	var infos []ObjectInfo
+	for _, child := range f.node.children {
+		infos = append(infos, child)
+	}
+	return infos, nil
+}
