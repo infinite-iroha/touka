@@ -118,3 +118,14 @@ r.GET("/events-graceful", func(c *touka.Context) {
 ```
 
 在该示例中，我们显式地在回调函数中使用 `select` 监听 `ctx.Done()`。虽然 Touka 的 `EventStream` 内部也会检查此信号，但在回调内部自行处理可以执行更复杂的清理逻辑（如关闭数据库连接、停止特定的 Goroutine 等）。
+
+### 为什么会出现 "context deadline exceeded"？
+
+如果您在优雅停机时遇到 `context deadline exceeded` 错误，通常是因为 SSE 连接仍然活跃，而 `http.Server.Shutdown` 正在等待它们结束。
+
+在 Touka 的新版本中，我们通过 `BaseContext` 将 `Engine` 的关闭信号注入到了每个请求的 `Context` 中。这意味着：
+1. 当服务器收到关闭信号时，`engine.shutdownCtx` 会被取消。
+2. 随后，所有活跃请求的 `c.Request.Context()` 也会收到取消信号。
+3. 您的 SSE 处理器中的 `case <-c.Request.Context().Done():` 会立即触发，从而优雅地结束连接。
+
+**注意：** 请务必使用 `RunShutdown`、`RunTLS` 或 `RunTLSRedir` 来启动服务器，以便框架能自动管理这些信号。
