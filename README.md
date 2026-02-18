@@ -2,9 +2,19 @@
 
 Touka(灯花) 是一个基于 Go 语言构建的多层次、高性能 Web 框架。其设计目标是为开发者提供**更直接的控制、有效的扩展能力，以及针对特定场景的行为优化**。
 
-**想深入了解 Touka 吗？请阅读我们的 -> [深度指南 (about-touka.md)](about-touka.md)**
+## 文档
 
-这份深度指南包含了对框架设计哲学、核心功能（路由、上下文、中间件、错误处理等）的全面剖析，并提供了大量可直接使用的代码示例，帮助您快速上手并精通 Touka。
+我们提供了详尽的文档来帮助您快速上手并深入了解 Touka：
+
+- **[灯花框架简介 (introduction.md)](docs/introduction.md)**
+- **[快速开始 (quickstart.md)](docs/quickstart.md)**
+- **[路由系统 (routing.md)](docs/routing.md)**
+- **[上下文 Context (context.md)](docs/context.md)**
+- **[中间件 (middleware.md)](docs/middleware.md)**
+- **[统一错误处理 (error-handling.md)](docs/error-handling.md)**
+- **[静态文件与资源 (static-files.md)](docs/static-files.md)**
+- **[Server-Sent Events (sse.md)](docs/sse.md)**
+- **[高级特性与优化 (advanced.md)](docs/advanced.md)**
 
 ### 快速上手
 
@@ -72,11 +82,9 @@ func main() {
 - [jwt](https://github.com/fenthope/jwt)
 - [带宽限制](https://github.com/fenthope/toukautil/blob/main/bandwithlimiter.go)
 
-## 文档与贡献
+## 贡献
 
-*   **深度指南:** **[about-touka.md](about-touka.md)**
-*   **API 文档：** 访问 [pkg.go.dev/github.com/infinite-iroha/touka](https://pkg.go.dev/github.com/infinite-iroha/touka) 查看完整的 API 参考。
-*   **贡献：** 我们欢迎任何形式的贡献，无论是错误报告、功能建议还是代码提交。请遵循项目的贡献指南。
+我们欢迎任何形式的贡献，无论是错误报告、功能建议还是代码提交。请遵循项目的贡献指南。
 
 ## 相关项目
 
