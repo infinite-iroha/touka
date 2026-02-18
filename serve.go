@@ -224,7 +224,11 @@ func (engine *Engine) RunShutdown(addr string, timeouts ...time.Duration) error 
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: engine,
+		BaseContext: func(l net.Listener) context.Context {
+			return engine.shutdownCtx
+		},
 	}
+	srv.RegisterOnShutdown(engine.shutdownCancel)
 
 	// 应用框架的默认配置和用户提供的自定义配置
 	//engine.applyDefaultServerConfig(srv)
@@ -241,7 +245,11 @@ func (engine *Engine) RunShutdownWithContext(addr string, ctx context.Context, t
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: engine,
+		BaseContext: func(l net.Listener) context.Context {
+			return engine.shutdownCtx
+		},
 	}
+	srv.RegisterOnShutdown(engine.shutdownCancel)
 
 	// 应用框架的默认配置和用户提供的自定义配置
 	//engine.applyDefaultServerConfig(srv)
@@ -270,7 +278,11 @@ func (engine *Engine) RunTLS(addr string, tlsConfig *tls.Config, timeouts ...tim
 		Addr:      addr,
 		Handler:   engine,
 		TLSConfig: tlsConfig,
+		BaseContext: func(l net.Listener) context.Context {
+			return engine.shutdownCtx
+		},
 	}
+	srv.RegisterOnShutdown(engine.shutdownCancel)
 
 	// 应用框架的默认配置和用户提供的自定义配置
 	// 优先使用 TLSServerConfigurator,如果未设置,则回退到通用的 ServerConfigurator
@@ -304,7 +316,11 @@ func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Con
 		Addr:      httpsAddr,
 		Handler:   engine,
 		TLSConfig: tlsConfig,
+		BaseContext: func(l net.Listener) context.Context {
+			return engine.shutdownCtx
+		},
 	}
+	httpsSrv.RegisterOnShutdown(engine.shutdownCancel)
 	//engine.applyDefaultServerConfig(httpsSrv)
 	if engine.TLSServerConfigurator != nil {
 		engine.TLSServerConfigurator(httpsSrv)

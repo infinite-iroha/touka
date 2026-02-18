@@ -67,6 +67,9 @@ type Engine struct {
 	Protocols           ProtocolsConfig //协议版本配置
 	useDefaultProtocols bool            //是否使用默认协议
 
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+
 	// ServerConfigurator 允许在服务器启动前对其进行自定义配置
 	// 例如,设置 ReadTimeout, WriteTimeout 等
 	ServerConfigurator func(*http.Server)
@@ -207,6 +210,7 @@ func New() *Engine {
 		TLSServerConfigurator:    nil,
 		GlobalMaxRequestBodySize: -1,
 	}
+	engine.shutdownCtx, engine.shutdownCancel = context.WithCancel(context.Background())
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
 	engine.SetLoggerCfg(defaultLogRecoConfig)
@@ -765,4 +769,10 @@ func (engine *Engine) handleRequest(c *Context) {
 	c.handlers = handlers
 	c.Next() // 执行处理函数链
 	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+}
+
+// Context 返回 Engine 的根上下文, 该上下文在服务器优雅关闭时会被取消.
+// 它可以用于在长连接 (如 SSE) 中监听关闭信号.
+func (engine *Engine) Context() context.Context {
+	return engine.shutdownCtx
 }
