@@ -77,3 +77,44 @@ r.GET("/events-chan", func(c *touka.Context) {
 1. **资源回收**: 确保在 `EventStreamChan` 模式下正确监听 `c.Request.Context().Done()` 以避免 Goroutine 泄漏。
 2. **数据格式**: SSE 协议要求数据为 UTF-8。Touka 的 `Render` 方法会自动处理多行数据并加上必要的 `data:` 前缀。
 3. **超时管理**: SSE 连接通常是长连接，请确保您的反向代理（如 Nginx）配置了足够大的写超时时间。
+
+## 优雅关闭与资源清理
+
+在长连接场景下，正确处理客户端断开或服务器关闭信号至关重要，以防止资源泄漏。
+
+### 示例：监听 Context 取消信号
+
+```go
+r.GET("/events-graceful", func(c *touka.Context) {
+    // 设置响应头（如果手动处理，EventStream 会自动设置）
+
+    // 使用 Context 的 Done 通道来感知连接关闭
+    ctx := c.Request.Context()
+
+    // 启动一个用于模拟数据生成的循环
+    ticker := time.NewTicker(2 * time.Second)
+    defer ticker.Stop()
+
+    c.EventStream(func(w io.Writer) bool {
+        select {
+        case <-ctx.Done():
+            // 收到优雅关闭信号（客户端离开或服务器正在关闭）
+            fmt.Println("SSE 连接正在关闭，开始清理资源...")
+            return false // 返回 false 告知框架停止流
+
+        case t := <-ticker.C:
+            event := touka.Event{
+                Data: "Tick at " + t.Format(time.RFC3339),
+            }
+            if err := event.Render(w); err != nil {
+                return false
+            }
+            return true
+        }
+    })
+
+    fmt.Println("SSE 连接已彻底释放")
+})
+```
+
+在该示例中，我们显式地在回调函数中使用 `select` 监听 `ctx.Done()`。虽然 Touka 的 `EventStream` 内部也会检查此信号，但在回调内部自行处理可以执行更复杂的清理逻辑（如关闭数据库连接、停止特定的 Goroutine 等）。
