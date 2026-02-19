@@ -4,8 +4,8 @@ github.com/WJQSERVER-STUDIO/httpc v0.8.3 h1:g3CvOimwPonQuKDfbH8Ex35J/VSz+W1k5Q1F
 github.com/WJQSERVER-STUDIO/httpc v0.8.3/go.mod h1:/+NKun9LIUW5YFdvpOf7JbChSVsvdySOGn04FB3rTPg=
 github.com/WJQSERVER/wanf v0.0.6 h1:tB6Bsl7bg5uuJ4cn4l1Ctn9VvjNRE5/W0yAj3Z6367I=
 github.com/WJQSERVER/wanf v0.0.6/go.mod h1:zV0AQydpfiGsV2CcIy90SxSbiJgcvP3vinBJr0ZW3qs=
-github.com/fenthope/reco v0.0.4 h1:yo2g3aWwdoMpaZWZX4SdZOW7mCK82RQIU/YI8ZUQThM=
-github.com/fenthope/reco v0.0.4/go.mod h1:eMyS8HpdMVdJ/2WJt6Cvt8P1EH9Igzj5lSJrgc+0jeg=
+github.com/fenthope/reco v0.0.5 h1:Z/bOunFf4LSgYP/IxG9fe2pTrIq7bPsDflflbNR5Agw=
+github.com/fenthope/reco v0.0.5/go.mod h1:nd5gMkuJHN2+2Iwwt3xy+HSqRaROauIjHNkmQWRsHyM=
 github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 h1:vymEbVwYFP/L05h5TKQxvkXoKxNvTpjxYKdF1Nlwuao=
 github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433/go.mod h1:tphK2c80bpPhMOI4v6bIc2xWywPfbqi1Z06+RcrMkDg=
 github.com/valyala/bytebufferpool v1.0.0 h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw=
