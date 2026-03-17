@@ -40,8 +40,8 @@ func (e *Event) Render(w io.Writer) error {
 		buf.WriteString("\n")
 	}
 	if len(e.Data) > 0 {
-		lines := strings.Split(e.Data, "\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(e.Data, "\n")
+		for line := range lines {
 			buf.WriteString("data: ")
 			buf.WriteString(line)
 			buf.WriteString("\n")

@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -286,7 +288,7 @@ func (c *Context) Raw(code int, contentType string, data []byte) {
 // String 向响应写入格式化的字符串
 func (c *Context) String(code int, format string, values ...any) {
 	c.Writer.WriteHeader(code)
-	c.Writer.Write([]byte(fmt.Sprintf(format, values...)))
+	c.Writer.Write(fmt.Appendf(nil, format, values...))
 }
 
 // Text 向响应写入无需格式化的string
@@ -341,7 +343,6 @@ func (c *Context) FileText(code int, filePath string) {
 }
 
 /*
-// not fot work
 // FileTextSafeDir
 func (c *Context) FileTextSafeDir(code int, filePath string, safeDir string) {
 
@@ -465,7 +466,7 @@ func (c *Context) HTML(code int, name string, obj any) {
 		// 可以扩展支持其他渲染器接口
 	}
 	// 默认简单输出，用于未配置 HTMLRender 的情况
-	c.Writer.Write([]byte(fmt.Sprintf("<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj)))
+	c.Writer.Write(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj))
 }
 
 // Redirect 执行 HTTP 重定向
@@ -490,7 +491,7 @@ func (c *Context) ShouldBindJSON(obj any) error {
 	return nil
 }
 
-// ShouldBindWANF
+// ShouldBindWANF 尝试将 WANF 格式的请求体绑定到对象
 func (c *Context) ShouldBindWANF(obj any) error {
 	if c.Request.Body == nil {
 		return errors.New("request body is empty")
@@ -506,23 +507,174 @@ func (c *Context) ShouldBindWANF(obj any) error {
 	return nil
 }
 
-// Deprecated: This function is a reserved placeholder for future API extensions
-// and is not yet implemented. It will either be properly defined or removed in v2.0.0. Do not use.
-// ShouldBind 尝试将请求体绑定到各种类型（JSON, Form, XML 等）
-// 这是一个复杂的通用绑定接口，通常根据 Content-Type 或其他头部来判断绑定方式
-// 预留接口，可根据项目需求进行扩展
+// ShouldBindGOB 尝试将 GOB 格式的请求体绑定到对象
+func (c *Context) ShouldBindGOB(obj any) error {
+	if c.Request.Body == nil {
+		return errors.New("request body is empty")
+	}
+	decoder := gob.NewDecoder(c.Request.Body)
+	if err := decoder.Decode(obj); err != nil {
+		return fmt.Errorf("GOB binding error: %w", err)
+	}
+	return nil
+}
+
+// bindForm 将 url.Values 绑定到结构体
+// 支持 form tag 标签，如 `form:"field_name"`
+func bindForm(values url.Values, obj any) error {
+	val := reflect.ValueOf(obj)
+	if val.Kind() != reflect.Pointer || val.Elem().Kind() != reflect.Struct {
+		return errors.New("obj must be a pointer to struct")
+	}
+
+	val = val.Elem()
+	typ := val.Type()
+
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Field(i)
+		fieldType := typ.Field(i)
+
+		if !field.CanSet() {
+			continue
+		}
+
+		tag := fieldType.Tag.Get("form")
+		if tag == "" {
+			tag = fieldType.Name
+		}
+		if tag == "-" {
+			continue
+		}
+
+		formValues := values[tag]
+		if len(formValues) == 0 {
+			continue
+		}
+
+		if err := setFieldValue(field, formValues); err != nil {
+			return fmt.Errorf("field %s: %w", fieldType.Name, err)
+		}
+	}
+	return nil
+}
+
+// setFieldValue 将字符串值设置到反射值
+func setFieldValue(field reflect.Value, values []string) error {
+	if !field.CanSet() {
+		return nil
+	}
+
+	value := values[0]
+
+	switch field.Kind() {
+	case reflect.String:
+		field.SetString(value)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if value == "" {
+			return nil
+		}
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return err
+		}
+		field.SetInt(v)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if value == "" {
+			return nil
+		}
+		v, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return err
+		}
+		field.SetUint(v)
+	case reflect.Float32, reflect.Float64:
+		if value == "" {
+			return nil
+		}
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		field.SetFloat(v)
+	case reflect.Bool:
+		if value == "" {
+			return nil
+		}
+		v, err := strconv.ParseBool(value)
+		if err != nil {
+			return err
+		}
+		field.SetBool(v)
+	case reflect.Pointer:
+		if field.IsNil() {
+			field.Set(reflect.New(field.Type().Elem()))
+		}
+		return setFieldValue(field.Elem(), values)
+	case reflect.Slice:
+		slice := reflect.MakeSlice(field.Type(), len(values), len(values))
+		elemType := field.Type().Elem()
+		for i, v := range values {
+			if err := setFieldValue(slice.Index(i), []string{v}); err != nil {
+				return err
+			}
+			_ = elemType
+		}
+		field.Set(slice)
+	default:
+		return fmt.Errorf("unsupported type: %s", field.Kind())
+	}
+	return nil
+}
+
+// ShouldBindForm 尝试将表单数据绑定到结构体
+// 支持 application/x-www-form-urlencoded 和 multipart/form-data
+func (c *Context) ShouldBindForm(obj any) error {
+	contentType := c.Request.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return fmt.Errorf("invalid content type: %w", err)
+	}
+
+	switch mediaType {
+	case "multipart/form-data":
+		if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+			return fmt.Errorf("parse multipart form error: %w", err)
+		}
+	case "application/x-www-form-urlencoded":
+		if err := c.Request.ParseForm(); err != nil {
+			return fmt.Errorf("parse form error: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported form content type: %s", mediaType)
+	}
+
+	if err := bindForm(c.Request.Form, obj); err != nil {
+		return fmt.Errorf("form binding error: %w", err)
+	}
+	return nil
+}
+
+// ShouldBind 尝试根据 Content-Type 将请求体绑定到结构体
+// 支持的类型：application/json, application/x-www-form-urlencoded, multipart/form-data, application/wanf, application/vnd.wjqserver.wanf, application/gob
 func (c *Context) ShouldBind(obj any) error {
-	// TODO: 完整的通用绑定逻辑
-	// 可以根据 c.Request.Header.Get("Content-Type") 来判断是 JSON, Form, XML 等
-	// 例如：
-	// contentType := c.Request.Header.Get("Content-Type")
-	// if strings.HasPrefix(contentType, "application/json") {
-	//     return c.ShouldBindJSON(obj)
-	// }
-	// if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") || strings.HasPrefix(contentType, "multipart/form-data") {
-	//     return c.ShouldBindForm(obj) // 需要实现 ShouldBindForm
-	// }
-	return errors.New("generic binding not fully implemented yet, implement based on Content-Type")
+	contentType := c.Request.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return fmt.Errorf("invalid content type: %w", err)
+	}
+
+	switch mediaType {
+	case "application/json":
+		return c.ShouldBindJSON(obj)
+	case "application/x-www-form-urlencoded", "multipart/form-data":
+		return c.ShouldBindForm(obj)
+	case "application/wanf", "application/vnd.wjqserver.wanf":
+		return c.ShouldBindWANF(obj)
+	case "application/gob":
+		return c.ShouldBindGOB(obj)
+	default:
+		return fmt.Errorf("unsupported content type: %s", mediaType)
+	}
 }
 
 // AddError 添加一个错误到 Context

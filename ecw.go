@@ -7,6 +7,7 @@ package touka
 import (
 	"bufio"
 	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"sync"
@@ -27,7 +28,7 @@ type errorCapturingResponseWriter struct {
 
 // errorResponseWriterPool 是用于复用 errorCapturingResponseWriter 实例的对象池
 var errorResponseWriterPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &errorCapturingResponseWriter{
 			headerSnapshot: make(http.Header), // 预先初始化 map, 减少 reset 时的分配
 		}
@@ -91,9 +92,8 @@ func (ecw *errorCapturingResponseWriter) WriteHeader(statusCode int) {
 		// 是成功状态码
 		// 将 ecw.headerSnapshot 中（由 FileServer 在此之前通过 ecw.Header() 设置的）
 		// 任何头部直接复制到原始的 w.Header(), 确保多值头部正确传递
-		for k, v := range ecw.headerSnapshot {
-			ecw.w.Header()[k] = v // 直接赋值 []string, 保留所有值
-		}
+		// 直接赋值 []string, 保留所有值
+		maps.Copy(ecw.w.Header(), ecw.headerSnapshot)
 		ecw.w.WriteHeader(statusCode) // 实际写入状态码到原始 ResponseWriter
 		ecw.responseStarted = true    // 标记成功响应已开始
 	}
@@ -112,9 +112,8 @@ func (ecw *errorCapturingResponseWriter) Write(data []byte) (int, error) {
 			ecw.statusCode = http.StatusOK // 隐式 200 OK
 		}
 		// 将 headerSnapshot 中的头部复制到原始 ResponseWriter 的 Header
-		for k, v := range ecw.headerSnapshot {
-			ecw.w.Header()[k] = v // 直接赋值 []string, 保留所有值
-		}
+		// 直接赋值 []string, 保留所有值
+		maps.Copy(ecw.w.Header(), ecw.headerSnapshot)
 		ecw.w.WriteHeader(ecw.Status()) // 发送实际的状态码 (可能是 200 或之前设置的 2xx)
 		ecw.responseStarted = true
 	}
