@@ -17,6 +17,9 @@ r.OPTIONS("/someOptions", handle)
 
 // 注册所有上述方法的路由
 r.ANY("/any", handle)
+
+// 同时注册多个方法
+r.HandleFunc([]string{"GET", "POST"}, "/multi", handle)
 ```
 
 ## 路径参数 (Named Parameters)
@@ -91,4 +94,60 @@ routes := r.GetRouterInfo()
 for _, route := range routes {
     fmt.Printf("Method: %s, Path: %s\n", route.Method, route.Path)
 }
+```
+
+## 自定义 404 处理
+
+当请求没有匹配到任何路由时，Touka 会返回 404。您可以自定义 404 的处理逻辑：
+
+```go
+// 使用单个处理器
+r.NoRoute(func(c *touka.Context) {
+    c.JSON(http.StatusNotFound, touka.H{
+        "error": "资源未找到",
+        "path":  c.Request.URL.Path,
+    })
+})
+
+// 使用处理器链
+r.NoRoutes(
+    LogNotFoundMiddleware(),
+    func(c *touka.Context) {
+        c.JSON(http.StatusNotFound, touka.H{"error": "Not found"})
+    },
+)
+```
+
+**注意**：`NoRoute` 和 `NoRoutes` 不是处理链的终点，您仍然可以在其中调用 `c.Next()` 来继续执行默认的 404 处理。
+
+## 静态文件路由
+
+Touka 提供了便捷的方法来注册静态文件路由：
+
+```go
+// 服务整个目录
+r.StaticDir("/assets", "./static")
+// 访问 /assets/js/main.js 将返回 ./static/js/main.js
+
+// 服务单个文件
+r.StaticFile("/favicon.ico", "./resources/favicon.ico")
+
+// 服务嵌入式文件系统
+//go:embed dist/*
+var content embed.FS
+
+func main() {
+    r := touka.Default()
+    fsroot, _ := fs.Sub(content, "dist")
+    r.StaticFS("/", http.FS(fsroot))
+    r.Run(":8080")
+}
+```
+
+这些方法同样可以在路由组中使用：
+
+```go
+api := r.Group("/api")
+api.StaticDir("/files", "./uploads")
+api.StaticFile("/logo", "./assets/logo.png")
 ```
