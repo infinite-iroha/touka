@@ -49,7 +49,7 @@ func main() {
 
 ```go
 r := touka.New()
-r.SetUnMatchFS(http.Dir("./frontend/dist"), true)
+r.SetUnMatchFS(http.Dir("./frontend/dist"))
 
 // API 路由
 r.GET("/api/status", handleStatus)

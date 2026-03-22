@@ -78,8 +78,8 @@ Touka 允许您自定义路由匹配的行为：
 
 ```go
 r := touka.New()
-r.RedirectTrailingSlash = true
-r.HandleMethodNotAllowed = true
+r.SetRedirectTrailingSlash(true)
+r.SetHandleMethodNotAllowed(true)
 ```
 
 ## 获取已注册路由信息

@@ -73,5 +73,5 @@ r.SetLoggerCfg(logConfig)
 
 ```go
 // 设置全局最大读取限制（例如 2MB）
-r.SetMaxReader(2 << 20)
+r.SetGlobalMaxRequestBodySize(2 << 20)
 ```

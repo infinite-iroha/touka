@@ -33,12 +33,12 @@ r.POST("/form_post", func(c *touka.Context) {
 
 ### JSON 绑定
 
-Touka 提供了非常便捷的 JSON 绑定功能，它会自动解析请求体并填充到结构体中，同时进行基本的验证。
+Touka 提供了非常便捷的 JSON 绑定功能，它会自动解析请求体并填充到结构体中。
 
 ```go
 type LoginRequest struct {
-    User     string `json:"user" binding:"required"`
-    Password string `json:"password" binding:"required"`
+    User     string `json:"user"`
+    Password string `json:"password"`
 }
 
 r.POST("/login", func(c *touka.Context) {

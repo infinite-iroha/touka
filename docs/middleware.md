@@ -53,7 +53,7 @@ func TimerMiddleware() touka.HandlerFunc {
 ```go
 func APIKeyAuth() touka.HandlerFunc {
     return func(c *touka.Context) {
-        apiKey := c.GetHeader("X-API-KEY")
+        apiKey := c.GetReqHeader("X-API-KEY")
         if apiKey != "secret-token" {
             // 验证失败，返回错误并中止后续逻辑
             c.JSON(http.StatusUnauthorized, touka.H{"error": "Invalid API Key"})
