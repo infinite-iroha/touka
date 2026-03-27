@@ -211,7 +211,7 @@ func (engine *Engine) Run(addr ...string) error {
 	srv := &http.Server{Addr: address, Handler: engine}
 
 	// 即使是不支持优雅关闭的 Run,也应用默认和用户配置,以保持行为一致性
-	//engine.applyDefaultServerConfig(srv)
+	engine.applyDefaultServerConfig(srv)
 	if engine.ServerConfigurator != nil {
 		engine.ServerConfigurator(srv)
 	}
@@ -231,7 +231,7 @@ func (engine *Engine) RunShutdown(addr string, timeouts ...time.Duration) error 
 	srv.RegisterOnShutdown(engine.shutdownCancel)
 
 	// 应用框架的默认配置和用户提供的自定义配置
-	//engine.applyDefaultServerConfig(srv)
+	engine.applyDefaultServerConfig(srv)
 	if engine.ServerConfigurator != nil {
 		engine.ServerConfigurator(srv)
 	}
@@ -252,7 +252,7 @@ func (engine *Engine) RunShutdownWithContext(addr string, ctx context.Context, t
 	srv.RegisterOnShutdown(engine.shutdownCancel)
 
 	// 应用框架的默认配置和用户提供的自定义配置
-	//engine.applyDefaultServerConfig(srv)
+	engine.applyDefaultServerConfig(srv)
 	if engine.ServerConfigurator != nil {
 		engine.ServerConfigurator(srv)
 	}
@@ -268,7 +268,7 @@ func (engine *Engine) RunTLS(addr string, tlsConfig *tls.Config, timeouts ...tim
 
 	// 配置 HTTP/2 支持 (如果使用默认配置)
 	if engine.useDefaultProtocols {
-		engine.SetProtocols(&ProtocolsConfig{
+		engine.setProtocols(&ProtocolsConfig{
 			Http1: true,
 			Http2: true, // 默认在 TLS 上启用 HTTP/2
 		})
@@ -286,7 +286,7 @@ func (engine *Engine) RunTLS(addr string, tlsConfig *tls.Config, timeouts ...tim
 
 	// 应用框架的默认配置和用户提供的自定义配置
 	// 优先使用 TLSServerConfigurator,如果未设置,则回退到通用的 ServerConfigurator
-	//engine.applyDefaultServerConfig(srv)
+	engine.applyDefaultServerConfig(srv)
 	if engine.TLSServerConfigurator != nil {
 		engine.TLSServerConfigurator(srv)
 	} else if engine.ServerConfigurator != nil {
@@ -310,7 +310,7 @@ func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Con
 
 	// --- HTTPS 服务器 ---
 	if engine.useDefaultProtocols {
-		engine.SetProtocols(&ProtocolsConfig{Http1: true, Http2: true})
+		engine.setProtocols(&ProtocolsConfig{Http1: true, Http2: true})
 	}
 	httpsSrv := &http.Server{
 		Addr:      httpsAddr,
@@ -321,7 +321,7 @@ func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Con
 		},
 	}
 	httpsSrv.RegisterOnShutdown(engine.shutdownCancel)
-	//engine.applyDefaultServerConfig(httpsSrv)
+	engine.applyDefaultServerConfig(httpsSrv)
 	if engine.TLSServerConfigurator != nil {
 		engine.TLSServerConfigurator(httpsSrv)
 	} else if engine.ServerConfigurator != nil {
@@ -355,7 +355,7 @@ func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Con
 		Addr:    httpAddr,
 		Handler: redirectHandler,
 	}
-	//engine.applyDefaultServerConfig(httpSrv)
+	engine.applyDefaultServerConfig(httpSrv)
 	if engine.ServerConfigurator != nil {
 		engine.ServerConfigurator(httpSrv)
 	}

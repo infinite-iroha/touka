@@ -319,11 +319,16 @@ func GetDefaultProtocolsConfig() *ProtocolsConfig {
 // 设置默认Protocols
 func (engine *Engine) SetDefaultProtocols() {
 	engine.useDefaultProtocols = true
-	engine.SetProtocols(GetDefaultProtocolsConfig())
+	engine.setProtocols(GetDefaultProtocolsConfig())
 }
 
 // 设置Protocol
 func (engine *Engine) SetProtocols(config *ProtocolsConfig) {
+	engine.setProtocols(config)
+	engine.useDefaultProtocols = false
+}
+
+func (engine *Engine) setProtocols(config *ProtocolsConfig) {
 	engine.Protocols = *config
 	engine.serverProtocols = &http.Protocols{} // 初始化指针
 	func() {
@@ -333,7 +338,13 @@ func (engine *Engine) SetProtocols(config *ProtocolsConfig) {
 		p.SetUnencryptedHTTP2(config.Http2_Cleartext)
 		*engine.serverProtocols = p // 将值赋给指针指向的结构体
 	}()
-	engine.useDefaultProtocols = false
+}
+
+// applyDefaultServerConfig 应用框架的默认配置到 http.Server
+func (engine *Engine) applyDefaultServerConfig(srv *http.Server) {
+	if engine.serverProtocols != nil {
+		srv.Protocols = engine.serverProtocols
+	}
 }
 
 // 配置全局Req Body大小限制
