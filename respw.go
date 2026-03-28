@@ -45,6 +45,15 @@ func newResponseWriter(w http.ResponseWriter) ResponseWriter {
 	}
 }
 
+// UnwrapResponseWriter returns the underlying stdlib response writer when the
+// provided writer is Touka's internal wrapper.
+func UnwrapResponseWriter(w ResponseWriter) http.ResponseWriter {
+	if wrapped, ok := w.(*responseWriterImpl); ok && wrapped.ResponseWriter != nil {
+		return wrapped.ResponseWriter
+	}
+	return w
+}
+
 func (rw *responseWriterImpl) reset(w http.ResponseWriter) {
 	rw.ResponseWriter = w
 	rw.status = 0
@@ -54,6 +63,10 @@ func (rw *responseWriterImpl) reset(w http.ResponseWriter) {
 
 func (rw *responseWriterImpl) WriteHeader(statusCode int) {
 	if rw.hijacked {
+		return
+	}
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		rw.ResponseWriter.WriteHeader(statusCode)
 		return
 	}
 	if rw.status == 0 { // 确保只设置一次

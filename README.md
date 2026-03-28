@@ -13,6 +13,7 @@ Touka(灯花) 是一个基于 Go 语言构建的多层次、高性能 Web 框架
 - **[中间件 (middleware.md)](docs/middleware.md)**
 - **[统一错误处理 (error-handling.md)](docs/error-handling.md)**
 - **[静态文件与资源 (static-files.md)](docs/static-files.md)**
+- **[反向代理 (reverse-proxy.md)](docs/reverse-proxy.md)**
 - **[Server-Sent Events (sse.md)](docs/sse.md)**
 - **[高级特性与优化 (advanced.md)](docs/advanced.md)**
 
