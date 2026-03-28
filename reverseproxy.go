@@ -910,6 +910,11 @@ func cleanReverseProxyQueryParams(rawQuery string) string {
 	if rawQuery == "" {
 		return ""
 	}
+	// Normalize the outgoing query string so the proxy and upstream do not see
+	// different semantics for non-standard separators or malformed pairs.
+	// This can change the exact textual form of the original query and may drop
+	// parts that net/url rejects, but it keeps proxy-chain parsing behavior more
+	// consistent and reduces parameter-smuggling ambiguity.
 	values, _ := url.ParseQuery(rawQuery)
 	return values.Encode()
 }

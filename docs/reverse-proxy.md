@@ -52,6 +52,8 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
 - `/api/orders?id=10` 会转发到 `/backend/api/orders?id=10`
 
 目标 URL 自身携带的查询参数也会被保留并与原请求查询参数合并。
+合并后的出站查询串会再经过一次规范化处理，因此某些非标准分隔符（例如 `;`）或非法参数片段可能被重编码、折叠或直接丢弃。
+这是为了尽量让代理链各跳对查询参数的解析结果保持一致，并减少参数走私这类解析歧义风险。
 
 ## 配置项说明
 
