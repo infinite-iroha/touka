@@ -472,6 +472,10 @@ func (p *reverseProxyHandler) handleError(c *Context, err error) {
 		return
 	}
 	c.AddError(err)
+	if c.Writer.IsHijacked() {
+		p.logf(c, "reverse proxy error after hijack: %v", err)
+		return
+	}
 	if p.config.ErrorHandler != nil {
 		p.config.ErrorHandler(c.Writer, c.Request, err)
 		if c.Writer.Written() || c.Writer.IsHijacked() {
@@ -906,10 +910,7 @@ func cleanReverseProxyQueryParams(rawQuery string) string {
 	if rawQuery == "" {
 		return ""
 	}
-	values, err := url.ParseQuery(rawQuery)
-	if err == nil {
-		return rawQuery
-	}
+	values, _ := url.ParseQuery(rawQuery)
 	return values.Encode()
 }
 

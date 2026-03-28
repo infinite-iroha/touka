@@ -168,10 +168,17 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
 
 在后端返回响应后、写回客户端前，对响应做额外处理。
 
+注意：`ModifyResponse` 也会作用于 `101 Switching Protocols` 响应。
+如果该代理路由需要转发 WebSocket 或其他 Upgrade 流量，请不要在这里消费、完全缓冲，或替换 `resp.Body` 为只读对象；后续升级流程仍然要求它保留 `io.ReadWriteCloser` 能力。
+更稳妥的做法是对 `101` 响应直接跳过这类处理。
+
 ```go
 r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
     Target: target,
     ModifyResponse: func(resp *http.Response) error {
+        if resp.StatusCode == http.StatusSwitchingProtocols {
+            return nil
+        }
         resp.Header.Set("X-Proxy", "touka")
         return nil
     },

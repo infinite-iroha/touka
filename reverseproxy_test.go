@@ -74,7 +74,7 @@ func TestReverseProxyForwardingAndHopHeaders(t *testing.T) {
 		Via:              "proxy.test",
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "http://client.example/api/ping?q=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://client.example/api/ping?bad=1;smuggle=2&q=2", nil)
 	req.Host = "client.example"
 	req.RemoteAddr = "198.51.100.10:4567"
 	req.Header.Set("Connection", "X-Remove-Me")
