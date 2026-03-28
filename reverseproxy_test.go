@@ -187,6 +187,43 @@ func TestReverseProxyCustomErrorHandler(t *testing.T) {
 	}
 }
 
+func TestReverseProxyUnannouncedTrailerForwarding(t *testing.T) {
+	t.Helper()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(http.TrailerPrefix+"X-Unannounced-Trailer", "later")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "streamed")
+	}))
+	defer backend.Close()
+
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+
+	engine := New()
+	engine.GET("/trailers", ReverseProxy(ReverseProxyConfig{Target: target}))
+
+	rr := PerformRequest(engine, http.MethodGet, "/trailers", nil, nil)
+	resp := rr.Result()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if string(body) != "streamed" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+	if got := resp.Trailer.Get("X-Unannounced-Trailer"); got != "later" {
+		t.Fatalf("unexpected unannounced trailer: %q", got)
+	}
+}
+
 func TestReverseProxyProtocolUpgrade(t *testing.T) {
 	t.Helper()
 

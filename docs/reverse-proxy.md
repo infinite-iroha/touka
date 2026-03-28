@@ -110,6 +110,40 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
 
 对于 SSE 和无 `Content-Length` 的流式响应，Touka 会自动立即刷新，不依赖该配置。
 
+### `BufferPool`
+
+可选。用于为响应体复制过程提供可复用的字节缓冲区，以减少大响应或高并发代理场景下的临时内存分配。
+
+如果留空，Touka 会在复制响应体时按需分配默认缓冲区。
+
+```go
+type bytePool struct {
+    pool sync.Pool
+}
+
+func (p *bytePool) Get() []byte {
+    if buf, ok := p.pool.Get().([]byte); ok {
+        return buf
+    }
+    return make([]byte, 32*1024)
+}
+
+func (p *bytePool) Put(buf []byte) {
+    if cap(buf) >= 32*1024 {
+        p.pool.Put(buf[:32*1024])
+    }
+}
+
+proxyPool := &bytePool{}
+
+r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
+    Target:     target,
+    BufferPool: proxyPool,
+}))
+```
+
+通常只有在您已经观察到明显的分配压力，或代理的响应体较大、吞吐较高时，才需要专门配置它。
+
 ### `ModifyRequest`
 
 在请求真正发往后端前，对出站请求做最后修改。

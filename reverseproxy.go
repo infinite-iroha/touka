@@ -359,6 +359,10 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 		c.Writer.Flush()
 	}
 
+	// Keep the stdlib-compatible fallback here.
+	// If the backend only exposes additional trailer keys after the body has been
+	// fully read, the trailer map can grow and those values must be written using
+	// the TrailerPrefix form instead of the pre-announced bare header keys.
 	if len(res.Trailer) == announcedTrailers {
 		reverseProxyCopyHeader(c.Writer.Header(), res.Trailer)
 		return
@@ -378,6 +382,11 @@ func (p *reverseProxyHandler) requestContext(c *Context) (context.Context, conte
 		return ctx, func() {}
 	}
 
+	// Follow the same compatibility path as net/http/httputil.ReverseProxy:
+	// request contexts are normally cancelable, but middleware can still replace
+	// c.Request with one backed by context.Background/TODO or another context with
+	// a nil Done channel. In that case CloseNotifier still provides disconnect
+	// propagation for the upstream round trip.
 	rawWriter := reverseProxyBaseResponseWriter(c.Writer)
 	cn, ok := rawWriter.(http.CloseNotifier)
 	if !ok {
