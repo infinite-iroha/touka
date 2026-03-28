@@ -238,6 +238,24 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
 }))
 ```
 
+`Via` 不是“留空即禁用”的开关。当前实现中：
+
+- 如果 `Via` 非空，则使用该值追加 `Via`
+- 如果 `Via` 为空，则会回退到固定值 `touka-engine`
+
+因此，把 `Via` 留空时，发送出去的请求仍会包含 `Via` 头，只是使用默认标识 `touka-engine`。
+
+如果您希望上游清楚区分不同入口、环境或网关实例，仍然建议显式设置一个稳定且可公开暴露的代理标识，例如：
+
+```go
+r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
+    Target: target,
+    Via:    "edge-gateway",
+}))
+```
+
+当前版本没有提供“完全禁用追加 Via”的单独配置项，因此不要把空字符串当作关闭手段。
+
 ### Touka 会如何处理这些头？
 
 Touka 会尽量遵循代理链语义：

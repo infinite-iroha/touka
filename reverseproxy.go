@@ -17,7 +17,6 @@ import (
 	"net/netip"
 	"net/textproto"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -299,9 +298,12 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 				return nil
 			}
 			h := c.Writer.Header()
+			saved := h.Clone()
+			clear(h)
 			reverseProxyCopyHeader(h, http.Header(header))
 			rawWriter.WriteHeader(code)
 			clear(h)
+			reverseProxyCopyHeader(h, saved)
 			return nil
 		},
 	}
@@ -482,6 +484,13 @@ func (p *reverseProxyHandler) handleError(c *Context, err error) {
 func (p *reverseProxyHandler) handleUpgradeResponse(c *Context, req *http.Request, res *http.Response) error {
 	reqUpType := reverseProxyUpgradeType(req.Header)
 	resUpType := reverseProxyUpgradeType(res.Header)
+	if reqUpType == "" || resUpType == "" {
+		res.Body.Close()
+		return &reverseProxyStatusError{
+			status: http.StatusBadGateway,
+			err:    fmt.Errorf("invalid upgrade negotiation: request protocol=%q, response protocol=%q", reqUpType, resUpType),
+		}
+	}
 	if !isPrintableASCII(resUpType) {
 		res.Body.Close()
 		return &reverseProxyStatusError{
@@ -660,11 +669,7 @@ func reverseProxyReceivedBy(configValue string) string {
 	if trimmed != "" {
 		return trimmed
 	}
-	hostname, err := os.Hostname()
-	if err == nil && hostname != "" {
-		return hostname
-	}
-	return "touka"
+	return "touka-engine"
 }
 
 func reverseProxyClientIP(remoteAddr string) string {
