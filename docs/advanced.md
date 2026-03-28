@@ -184,6 +184,8 @@ r.SetRemoteIPHeaders([]string{
 })
 ```
 
+如果您同时使用 Touka 的 `ReverseProxy` 把请求继续转发给其他后端，请再参考 `docs/reverse-proxy.md` 中关于 `Forwarded`、`X-Forwarded-*` 与 `Via` 的说明。前者解决“当前请求的客户端 IP 如何被 Touka 正确解析”，后者解决“代理后的请求如何把链路信息继续传给下一跳”。
+
 ## 请求体大小限制
 
 为了防止恶意的大数据包攻击（如慢速 HTTP 攻击或内存溢出），Touka 内置了请求体大小限制机制。
