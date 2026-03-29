@@ -417,6 +417,22 @@ func (c *Context) JSON(code int, obj any) {
 	}
 }
 
+// JSONBuf 先将 JSON 编码到 buffer, 成功后再写入状态码和响应体.
+// 与 JSON 相比，编码失败时可以正确返回 500 状态码，代价是多一次内存分配.
+func (c *Context) JSONBuf(code int, obj any) {
+	var buf bytes.Buffer
+	if err := json.MarshalWrite(&buf, obj); err != nil {
+		errMsg := fmt.Errorf("failed to marshal JSON: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+		return
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	c.Writer.Write(buf.Bytes())
+}
+
 // GOB 向响应写入GOB数据
 // 设置 Content-Type 为 application/octet-stream
 func (c *Context) GOB(code int, obj any) {
@@ -431,6 +447,21 @@ func (c *Context) GOB(code int, obj any) {
 	}
 }
 
+// GOBBuf 先将 GOB 编码到 buffer, 成功后再写入状态码和响应体.
+func (c *Context) GOBBuf(code int, obj any) {
+	var buf bytes.Buffer
+	encoder := gob.NewEncoder(&buf)
+	if err := encoder.Encode(obj); err != nil {
+		errMsg := fmt.Errorf("failed to encode GOB: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "application/octet-stream")
+	c.Writer.WriteHeader(code)
+	c.Writer.Write(buf.Bytes())
+}
+
 // WANF向响应写入WANF数据
 // 设置 application/vnd.wjqserver.wanf; charset=utf-8
 func (c *Context) WANF(code int, obj any) {
@@ -443,6 +474,21 @@ func (c *Context) WANF(code int, obj any) {
 		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode WANF: %w", err))
 		return
 	}
+}
+
+// WANFBuf 先将 WANF 编码到 buffer, 成功后再写入状态码和响应体.
+func (c *Context) WANFBuf(code int, obj any) {
+	var buf bytes.Buffer
+	encoder := wanf.NewStreamEncoder(&buf)
+	if err := encoder.Encode(obj); err != nil {
+		errMsg := fmt.Errorf("failed to encode WANF: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "application/vnd.wjqserver.wanf; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	c.Writer.Write(buf.Bytes())
 }
 
 // HTML 渲染 HTML 模板
@@ -467,6 +513,36 @@ func (c *Context) HTML(code int, name string, obj any) {
 	}
 	// 默认简单输出，用于未配置 HTMLRender 的情况
 	c.Writer.Write(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj))
+}
+
+// HTMLBuf 先将 HTML 模板渲染到 buffer, 成功后再写入状态码和响应体.
+// 如果模板渲染失败，则返回 500 错误且不写入任何内容.
+func (c *Context) HTMLBuf(code int, name string, obj any) {
+	if c.engine == nil || c.engine.HTMLRender == nil {
+		// 没有渲染器，回退到简单输出
+		c.HTML(code, name, obj)
+		return
+	}
+
+	if tpl, ok := c.engine.HTMLRender.(*template.Template); ok {
+		var buf bytes.Buffer
+		err := tpl.ExecuteTemplate(&buf, name, obj)
+		if err != nil {
+			// 渲染失败，记录错误并返回 500，不写入任何内容
+			errMsg := fmt.Errorf("failed to render HTML template '%s': %w", name, err)
+			c.AddError(errMsg)
+			c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+			return
+		}
+		// 渲染成功，写入响应
+		c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		c.Writer.WriteHeader(code)
+		c.Writer.Write(buf.Bytes())
+		return
+	}
+
+	// 不支持的渲染器类型，回退到简单输出
+	c.HTML(code, name, obj)
 }
 
 // Redirect 执行 HTTP 重定向
