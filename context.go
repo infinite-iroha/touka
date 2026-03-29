@@ -424,7 +424,6 @@ func (c *Context) JSONBuf(code int, obj any) {
 	if err != nil {
 		errMsg := fmt.Errorf("failed to marshal JSON: %w", err)
 		c.AddError(errMsg)
-		c.Errorf("%s", errMsg)
 		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
 		return
 	}
@@ -521,8 +520,9 @@ func (c *Context) HTMLBuf(code int, name string, obj any) {
 			var buf bytes.Buffer
 			err := tpl.ExecuteTemplate(&buf, name, obj)
 			if err != nil {
-				c.AddError(fmt.Errorf("failed to render HTML template '%s': %w", name, err))
-				c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to render HTML template '%s': %w", name, err))
+				errMsg := fmt.Errorf("failed to render HTML template '%s': %w", name, err)
+				c.AddError(errMsg)
+				c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
 				return
 			}
 			c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
