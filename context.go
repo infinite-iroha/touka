@@ -1167,6 +1167,9 @@ func (c *Context) SetCookie(name, value string, maxAge int, path, domain string,
 	}
 	site := c.sameSite
 	if len(sameSite) > 0 {
+		if len(sameSite) > 1 {
+			c.Warnf("SetCookie: only the first SameSite value will be used, got %d values", len(sameSite))
+		}
 		site = sameSite[0]
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
