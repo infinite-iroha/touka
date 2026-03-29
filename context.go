@@ -1160,9 +1160,17 @@ func (c *Context) SetSameSite(samesite http.SameSite) {
 }
 
 // SetCookie 设置一个 HTTP cookie
-func (c *Context) SetCookie(name, value string, maxAge int, path, domain string, secure, httpOnly bool) {
+// sameSite 参数是可选的，如果不提供则使用通过 SetSameSite 设置的值
+func (c *Context) SetCookie(name, value string, maxAge int, path, domain string, secure, httpOnly bool, sameSite ...http.SameSite) {
 	if path == "" {
 		path = "/"
+	}
+	site := c.sameSite
+	if len(sameSite) > 0 {
+		if len(sameSite) > 1 {
+			c.Warnf("SetCookie: only the first SameSite value will be used, got %d values", len(sameSite))
+		}
+		site = sameSite[0]
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     name,
@@ -1170,7 +1178,7 @@ func (c *Context) SetCookie(name, value string, maxAge int, path, domain string,
 		MaxAge:   maxAge,
 		Path:     path,
 		Domain:   domain,
-		SameSite: c.sameSite,
+		SameSite: site,
 		Secure:   secure,
 		HttpOnly: httpOnly,
 	})
