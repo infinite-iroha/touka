@@ -478,8 +478,9 @@ func (c *Context) WANF(code int, obj any) {
 
 // WANFBuf 先将 WANF 编码到 buffer, 成功后再写入状态码和响应体.
 func (c *Context) WANFBuf(code int, obj any) {
-	data, err := wanf.Marshal(obj)
-	if err != nil {
+	var buf bytes.Buffer
+	encoder := wanf.NewStreamEncoder(&buf)
+	if err := encoder.Encode(obj); err != nil {
 		errMsg := fmt.Errorf("failed to encode WANF: %w", err)
 		c.AddError(errMsg)
 		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
@@ -487,7 +488,7 @@ func (c *Context) WANFBuf(code int, obj any) {
 	}
 	c.Writer.Header().Set("Content-Type", "application/vnd.wjqserver.wanf; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(data)
+	c.Writer.Write(buf.Bytes())
 }
 
 // HTML 渲染 HTML 模板
