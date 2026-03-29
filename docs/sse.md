@@ -40,27 +40,20 @@ r.GET("/events", func(c *touka.Context) {
 
 ## 模式二：通道模式 (EventStreamChan)
 
-如果您需要更高级的并发控制（例如从多个异步源接收数据），可以使用通道模式。
+如果您需要更高级的并发控制（例如从多个异步源接收数据），可以使用通道模式。与回调模式类似，此方法是**阻塞的**：handler 会在此方法中停留，直到事件 channel 被关闭或客户端断开连接。
 
 ```go
 r.GET("/events-chan", func(c *touka.Context) {
-    eventChan, errChan := c.EventStreamChan()
+    eventChan := make(chan touka.Event)
 
-    // 监听错误/断开连接
+    // 在独立的 goroutine 中发送事件.
     go func() {
-        if err := <-errChan; err != nil {
-            log.Printf("SSE 错误: %v", err)
-        }
-    }()
-
-    // 发送数据
-    go func() {
-        defer close(eventChan) // 务必在结束时关闭
+        defer close(eventChan) // 务必在结束时关闭以结束事件流.
 
         for i := 0; i < 10; i++ {
             select {
             case <-c.Request.Context().Done():
-                return
+                return // 客户端已断开, 退出 goroutine.
             default:
                 eventChan <- touka.Event{
                     Data: fmt.Sprintf("消息 #%d", i),
@@ -69,14 +62,18 @@ r.GET("/events-chan", func(c *touka.Context) {
             }
         }
     }()
+
+    // EventStreamChan 会阻塞直到流结束.
+    c.EventStreamChan(eventChan)
 })
 ```
 
 ## 最佳实践
 
-1. **资源回收**: 确保在 `EventStreamChan` 模式下正确监听 `c.Request.Context().Done()` 以避免 Goroutine 泄漏。
-2. **数据格式**: SSE 协议要求数据为 UTF-8。Touka 的 `Render` 方法会自动处理多行数据并加上必要的 `data:` 前缀。
-3. **超时管理**: SSE 连接通常是长连接，请确保您的反向代理（如 Nginx）配置了足够大的写超时时间。
+1. **资源回收**: `EventStreamChan` 是阻塞的，handler 在事件流结束前不会返回。请确保生产者 goroutine 在 `select` 中监听 `c.Request.Context().Done()` 以响应客户端断开。
+2. **关闭 Channel**: 生产者完成发送后必须 `close(eventChan)`，否则 handler 会永远阻塞。
+3. **数据格式**: SSE 协议要求数据为 UTF-8。Touka 的 `Render` 方法会自动处理多行数据并加上必要的 `data:` 前缀。
+4. **超时管理**: SSE 连接通常是长连接，请确保您的反向代理（如 Nginx）配置了足够大的写超时时间。
 
 ## 优雅关闭与资源清理
 
