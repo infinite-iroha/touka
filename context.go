@@ -420,16 +420,17 @@ func (c *Context) JSON(code int, obj any) {
 // JSONBuf 先将 JSON 编码到 buffer, 成功后再写入状态码和响应体.
 // 与 JSON 相比，编码失败时可以正确返回 500 状态码，代价是多一次内存分配.
 func (c *Context) JSONBuf(code int, obj any) {
-	data, err := json.Marshal(obj)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := json.MarshalWrite(&buf, obj); err != nil {
 		errMsg := fmt.Errorf("failed to marshal JSON: %w", err)
 		c.AddError(errMsg)
 		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
 		return
 	}
+
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(data)
+	c.Writer.Write(buf.Bytes())
 }
 
 // GOB 向响应写入GOB数据
