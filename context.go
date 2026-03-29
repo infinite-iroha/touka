@@ -514,27 +514,32 @@ func (c *Context) HTML(code int, name string, obj any) {
 }
 
 // HTMLBuf 先将 HTML 模板渲染到 buffer, 成功后再写入状态码和响应体.
-// 如果模板渲染失败或不支持缓冲渲染，则回退到标准的 HTML 方法.
+// 如果模板渲染失败，则返回 500 错误且不写入任何内容.
 func (c *Context) HTMLBuf(code int, name string, obj any) {
-	if c.engine != nil && c.engine.HTMLRender != nil {
-		if tpl, ok := c.engine.HTMLRender.(*template.Template); ok {
-			var buf bytes.Buffer
-			err := tpl.ExecuteTemplate(&buf, name, obj)
-			if err == nil {
-				// 渲染成功，写入响应
-				c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-				c.Writer.WriteHeader(code)
-				c.Writer.Write(buf.Bytes())
-				return
-			}
-			// 渲染失败，记录错误后回退到 HTML()
+	if c.engine == nil || c.engine.HTMLRender == nil {
+		// 没有渲染器，回退到简单输出
+		c.HTML(code, name, obj)
+		return
+	}
+
+	if tpl, ok := c.engine.HTMLRender.(*template.Template); ok {
+		var buf bytes.Buffer
+		err := tpl.ExecuteTemplate(&buf, name, obj)
+		if err != nil {
+			// 渲染失败，记录错误并返回 500，不写入任何内容
 			errMsg := fmt.Errorf("failed to render HTML template '%s': %w", name, err)
 			c.AddError(errMsg)
 			c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
-			// 继续执行回退逻辑
+			return
 		}
+		// 渲染成功，写入响应
+		c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		c.Writer.WriteHeader(code)
+		c.Writer.Write(buf.Bytes())
+		return
 	}
-	// 回退到标准 HTML 方法（处理无模板引擎或其他渲染器的情况）
+
+	// 不支持的渲染器类型，回退到简单输出
 	c.HTML(code, name, obj)
 }
 
