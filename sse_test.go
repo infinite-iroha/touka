@@ -68,8 +68,7 @@ func TestEventStreamChanUnblocksOnClientDisconnect(t *testing.T) {
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				eventChan <- Event{Data: "tick"}
+			case eventChan <- Event{Data: "tick"}:
 				time.Sleep(10 * time.Millisecond)
 			}
 		}

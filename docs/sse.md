@@ -45,6 +45,7 @@ r.GET("/events", func(c *touka.Context) {
 ```go
 r.GET("/events-chan", func(c *touka.Context) {
     eventChan := make(chan touka.Event)
+    ctx := c.Request.Context()
 
     // 在独立的 goroutine 中发送事件.
     go func() {
@@ -52,14 +53,13 @@ r.GET("/events-chan", func(c *touka.Context) {
 
         for i := 0; i < 10; i++ {
             select {
-            case <-c.Request.Context().Done():
+            case <-ctx.Done():
                 return // 客户端已断开, 退出 goroutine.
-            default:
-                eventChan <- touka.Event{
-                    Data: fmt.Sprintf("消息 #%d", i),
-                }
-                time.Sleep(1 * time.Second)
+            case eventChan <- touka.Event{
+                Data: fmt.Sprintf("消息 #%d", i),
+            }:
             }
+            time.Sleep(1 * time.Second)
         }
     }()
 
@@ -70,7 +70,7 @@ r.GET("/events-chan", func(c *touka.Context) {
 
 ## 最佳实践
 
-1. **资源回收**: `EventStreamChan` 是阻塞的，handler 在事件流结束前不会返回。请确保生产者 goroutine 在 `select` 中监听 `c.Request.Context().Done()` 以响应客户端断开。
+1. **资源回收**: `EventStreamChan` 是阻塞的，handler 在事件流结束前不会返回。将 `c.Request.Context().Done()` 和 `eventChan <- ...` 作为同一个 `select` 的两个分支，确保发送操作本身能够响应客户端断开。
 2. **关闭 Channel**: 生产者完成发送后必须 `close(eventChan)`，否则 handler 会永远阻塞。
 3. **数据格式**: SSE 协议要求数据为 UTF-8。Touka 的 `Render` 方法会自动处理多行数据并加上必要的 `data:` 前缀。
 4. **超时管理**: SSE 连接通常是长连接，请确保您的反向代理（如 Nginx）配置了足够大的写超时时间。

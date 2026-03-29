@@ -132,13 +132,12 @@ func (c *Context) EventStream(streamer func(w io.Writer) bool) {
 //	            select {
 //	            case <-c.Request.Context().Done():
 //	                return // 客户端已断开, 退出 goroutine.
-//	            default:
-//	                eventChan <- touka.Event{
-//	                    Id:   fmt.Sprintf("%d", i),
-//	                    Data: "hello from channel",
-//	                }
-//	                time.Sleep(2 * time.Second)
+//	            case eventChan <- touka.Event{
+//	                Id:   fmt.Sprintf("%d", i),
+//	                Data: "hello from channel",
+//	            }:
 //	            }
+//	            time.Sleep(2 * time.Second)
 //	        }
 //	    }()
 //
@@ -155,7 +154,8 @@ func (c *Context) EventStreamChan(eventChan <-chan Event) {
 	c.Writer.Flush()
 
 	// 捕获稳定的引用, 不持有 *Context 指针, 以免 Context 被 pool 回收后出现竞态.
-	fl, _ := c.Writer.(http.Flusher)
+	w := c.Writer
+	fl, _ := w.(http.Flusher)
 	reqCtx := c.Request.Context()
 
 	goroutineExited := make(chan struct{})
@@ -170,7 +170,7 @@ func (c *Context) EventStreamChan(eventChan <-chan Event) {
 				if !ok {
 					return
 				}
-				if err := event.Render(c.Writer); err != nil {
+				if err := event.Render(w); err != nil {
 					return
 				}
 				if fl != nil {
