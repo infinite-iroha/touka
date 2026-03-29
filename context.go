@@ -418,13 +418,14 @@ func (c *Context) JSON(code int, obj any) {
 }
 
 // JSONBuf 先将 JSON 编码到 buffer, 成功后再写入状态码和响应体.
-// 与 JSON 相比, 编码失败时可以正确返回 500 状态码, 代价是多一次内存分配.
+// 与 JSON 相比，编码失败时可以正确返回 500 状态码，代价是多一次内存分配.
 func (c *Context) JSONBuf(code int, obj any) {
 	data, err := json.Marshal(obj)
 	if err != nil {
-		c.AddError(fmt.Errorf("failed to marshal JSON: %w", err))
-		c.Errorf("failed to marshal JSON: %s", err)
-		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to marshal JSON: %w", err))
+		errMsg := fmt.Errorf("failed to marshal JSON: %w", err)
+		c.AddError(errMsg)
+		c.Errorf("%s", errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -451,8 +452,9 @@ func (c *Context) GOBBuf(code int, obj any) {
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
 	if err := encoder.Encode(obj); err != nil {
-		c.AddError(fmt.Errorf("failed to encode GOB: %w", err))
-		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode GOB: %w", err))
+		errMsg := fmt.Errorf("failed to encode GOB: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "application/octet-stream")
@@ -478,8 +480,9 @@ func (c *Context) WANF(code int, obj any) {
 func (c *Context) WANFBuf(code int, obj any) {
 	data, err := wanf.Marshal(obj)
 	if err != nil {
-		c.AddError(fmt.Errorf("failed to encode WANF: %w", err))
-		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode WANF: %w", err))
+		errMsg := fmt.Errorf("failed to encode WANF: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
 		return
 	}
 	c.Writer.Header().Set("Content-Type", "application/vnd.wjqserver.wanf; charset=utf-8")
