@@ -75,7 +75,12 @@ func MergeCtx(parents ...context.Context) (ctx context.Context, cancel context.C
 
 // Value 返回当前Ctx Value
 func (mc *mergedContext) Value(key any) any {
-	return mc.Context.Value(key)
+	for _, p := range mc.parents {
+		if val := p.Value(key); val != nil {
+			return val
+		}
+	}
+	return nil
 }
 
 // Deadline 实现了 context.Context 的 Deadline 方法.
