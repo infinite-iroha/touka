@@ -46,11 +46,29 @@ func NewMaxBytesReader(r io.ReadCloser, n int64) io.ReadCloser {
 
 // Read 方法从底层的 ReadCloser 读取数据, 同时检查是否超过了字节限制.
 func (mbr *maxBytesReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	// 在函数开始时只加载一次原子变量, 减少后续的原子操作开销.
 	readSoFar := mbr.read.Load()
 
-	// 快速失败路径: 如果在读取之前就已经达到了限制, 立即返回错误.
-	if readSoFar >= mbr.n {
+	if readSoFar > mbr.n {
+		return 0, ErrBodyTooLarge
+	}
+
+	// 当已恰好读满限制时, 需要探测底层是否还有额外数据.
+	// 如果下一次读取立即 EOF, 说明请求体大小恰好等于限制, 属于合法情况.
+	if readSoFar == mbr.n {
+		var probe [1]byte
+		n, err := mbr.r.Read(probe[:])
+		if n > 0 {
+			mbr.read.Add(int64(n))
+			return 0, ErrBodyTooLarge
+		}
+		if err != nil {
+			return 0, err
+		}
 		return 0, ErrBodyTooLarge
 	}
 
