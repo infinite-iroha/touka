@@ -275,29 +275,29 @@ func (c *Context) PostForm(key string) string {
 	if c.formCache == nil {
 		if c.MaxRequestBodySize > 0 {
 			c.prepareRequestBody()
-			contentType := c.Request.Header.Get("Content-Type")
-			mediaType, _, err := mime.ParseMediaType(contentType)
-			if err != nil {
+		}
+		contentType := c.Request.Header.Get("Content-Type")
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			c.AddError(fmt.Errorf("parse form error: %w", err))
+			c.formCache = make(url.Values)
+			return ""
+		}
+
+		switch mediaType {
+		case "multipart/form-data":
+			if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
 				c.AddError(fmt.Errorf("parse form error: %w", err))
 				c.formCache = make(url.Values)
 				return ""
 			}
-
-			switch mediaType {
-			case "multipart/form-data":
-				if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
-					c.AddError(fmt.Errorf("parse form error: %w", err))
-					c.formCache = make(url.Values)
-					return ""
-				}
-			default:
-				if err := c.Request.ParseForm(); err != nil {
-					c.AddError(fmt.Errorf("parse form error: %w", err))
-					c.formCache = make(url.Values)
-					return ""
-				}
+		case "application/x-www-form-urlencoded":
+			if err := c.Request.ParseForm(); err != nil {
+				c.AddError(fmt.Errorf("parse form error: %w", err))
+				c.formCache = make(url.Values)
+				return ""
 			}
-		} else {
+		default:
 			if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
 				if !errors.Is(err, http.ErrNotMultipart) {
 					c.AddError(fmt.Errorf("parse form error: %w", err))
