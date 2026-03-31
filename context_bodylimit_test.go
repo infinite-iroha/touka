@@ -27,16 +27,6 @@ func (r *zeroNilThenEOFReader) Close() error {
 	return nil
 }
 
-type zeroNilForeverReader struct{}
-
-func (r *zeroNilForeverReader) Read(_ []byte) (int, error) {
-	return 0, nil
-}
-
-func (r *zeroNilForeverReader) Close() error {
-	return nil
-}
-
 func TestFileTextUsesProvidedStatusCode(t *testing.T) {
 	t.Helper()
 
@@ -107,21 +97,18 @@ func TestMaxBytesReaderAllowsZeroNilThenEOFAtExactLimit(t *testing.T) {
 	}
 }
 
-func TestMaxBytesReaderRejectsOverLimitWithoutProbeLoop(t *testing.T) {
+func TestMaxBytesReaderTreatsZeroLimitAsUnlimited(t *testing.T) {
 	t.Helper()
 
-	reader := NewMaxBytesReader(&zeroNilForeverReader{}, 0)
+	reader := NewMaxBytesReader(io.NopCloser(strings.NewReader("abc")), 0)
 	defer reader.Close()
 
-	buf := make([]byte, 1)
-	n, err := reader.Read(buf)
-	if n != 0 || err != nil {
-		t.Fatalf("expected initial zero,nil read result, got n=%d err=%v", n, err)
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("expected zero limit to leave body unlimited, got %v", err)
 	}
-
-	n, err = reader.Read(buf)
-	if n != 0 || !errors.Is(err, ErrBodyTooLarge) {
-		t.Fatalf("expected ErrBodyTooLarge after repeated zero,nil reads, got n=%d err=%v", n, err)
+	if string(data) != "abc" {
+		t.Fatalf("unexpected data: %q", string(data))
 	}
 }
 

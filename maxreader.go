@@ -31,13 +31,13 @@ type maxBytesReader struct {
 // 但在读取的字节数超过 n 后会返回 ErrBodyTooLarge 错误.
 //
 // 如果 r 为 nil, 会 panic.
-// 如果 n 小于 0, 则读取不受限制, 直接返回原始的 r.
+// 如果 n 小于等于 0, 则读取不受限制, 直接返回原始的 r.
 func NewMaxBytesReader(r io.ReadCloser, n int64) io.ReadCloser {
 	if r == nil {
 		panic("NewMaxBytesReader called with a nil reader")
 	}
-	// 如果限制为负数, 意味着不限制, 直接返回原始的 ReadCloser.
-	if n < 0 {
+	// 如果限制为非正数, 意味着不限制, 直接返回原始的 ReadCloser.
+	if n <= 0 {
 		return r
 	}
 	return &maxBytesReader{
