@@ -292,6 +292,7 @@ Touka 会尽量遵循代理链语义：
 Touka 的反向代理实现支持以下能力：
 
 - `CONNECT` 隧道转发（HTTP/1.x）
+- HTTP/2 extended `CONNECT`
 - `Connection: Upgrade` / `Upgrade` 协议升级转发
 - WebSocket 等 101 Switching Protocols 场景
 - SSE（Server-Sent Events）立即刷新

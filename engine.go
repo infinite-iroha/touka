@@ -7,6 +7,7 @@ package touka
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"runtime"
 	"strings"
@@ -344,6 +345,11 @@ func (engine *Engine) setProtocols(config *ProtocolsConfig) {
 func (engine *Engine) applyDefaultServerConfig(srv *http.Server) {
 	if engine.serverProtocols != nil {
 		srv.Protocols = engine.serverProtocols
+		if engine.serverProtocols.HTTP2() || engine.serverProtocols.UnencryptedHTTP2() {
+			if err := configureHTTP2ExtendedConnectServer(srv); err != nil {
+				panic(err)
+			}
+		}
 	}
 }
 
@@ -695,6 +701,11 @@ func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // handleRequest 负责根据请求查找路由并执行相应的处理函数链
 // 这是路由查找和执行的核心逻辑
 func (engine *Engine) handleRequest(c *Context) {
+	if isGeneralOptionsRequest(c.Request) {
+		engine.handleGeneralOptions(c)
+		return
+	}
+
 	httpMethod := c.Request.Method
 	requestPath := routeLookupPath(c.Request)
 
@@ -806,6 +817,20 @@ func (engine *Engine) allowedMethodsForPath(requestPath string) []string {
 		}
 	}
 	return allowedMethods
+}
+
+func (engine *Engine) handleGeneralOptions(c *Context) {
+	if c == nil || c.Request == nil {
+		return
+	}
+
+	c.Writer.Header().Set("Content-Length", "0")
+	if c.Request.ContentLength != 0 {
+		mb := http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
+		_, _ = io.Copy(io.Discard, mb)
+	}
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Abort()
 }
 
 // Context 返回 Engine 的根上下文, 该上下文在服务器优雅关闭时会被取消.
