@@ -242,10 +242,19 @@ const (
 r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
     Target:           target,
     ForwardedHeaders: touka.ForwardedBoth,
-    ForwardedBy:      "gateway-1",
+    ForwardedBy:      "_gateway-1",
     Via:              "edge-1",
 }))
 ```
+
+如果您配置了 `ForwardedBy`，它必须是一个符合 RFC 7239 的 node identifier。
+
+- IPv4：`203.0.113.43`
+- IPv6 / 带端口：`[2001:db8::17]:443`
+- 匿名标识：`_gateway-1`
+- 未知：`unknown`
+
+像 `gateway-1` 这类普通 token 不再被视为合法的 `by=` 值。
 
 `Via` 不是“留空即禁用”的开关。当前实现中：
 
@@ -282,11 +291,13 @@ Touka 会尽量遵循代理链语义：
 
 Touka 的反向代理实现支持以下能力：
 
+- `CONNECT` 隧道转发（HTTP/1.x）
 - `Connection: Upgrade` / `Upgrade` 协议升级转发
 - WebSocket 等 101 Switching Protocols 场景
 - SSE（Server-Sent Events）立即刷新
 - Trailer 透传
 - 1xx 响应透传
+- `TRACE` / `OPTIONS` 上的 `Max-Forwards` 递减与本地终止处理
 
 例如，代理 WebSocket 服务：
 
@@ -341,7 +352,7 @@ func main() {
     r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
         Target:           target,
         ForwardedHeaders: touka.ForwardedBoth,
-        ForwardedBy:      "gateway-1",
+        ForwardedBy:      "_gateway-1",
         Via:              "gateway-1",
         FlushInterval:    100 * time.Millisecond,
         ModifyRequest: func(req *http.Request) {
