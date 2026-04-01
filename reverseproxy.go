@@ -829,6 +829,19 @@ func (p *reverseProxyHandler) handleExtendedConnectResponse(c *Context, req *htt
 		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
 	}
 
+	var closeOnce sync.Once
+	closeTunnel := func() {
+		closeOnce.Do(func() {
+			_ = c.Request.Body.Close()
+			_ = backWrite.Close()
+			_ = res.Body.Close()
+		})
+	}
+	go func() {
+		<-req.Context().Done()
+		closeTunnel()
+	}()
+
 	errc := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(backWrite, c.Request.Body)
@@ -849,19 +862,24 @@ func (p *reverseProxyHandler) handleExtendedConnectResponse(c *Context, req *htt
 		errc <- closeErr
 	}()
 
-	firstErr := <-errc
-	_ = c.Request.Body.Close()
-	_ = backWrite.Close()
-	_ = res.Body.Close()
-	secondErr := <-errc
-
-	for _, err := range []error{firstErr, secondErr} {
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		err := <-errc
 		if reverseProxyIsBenignTunnelError(err) {
 			continue
 		}
-		return err
+		if firstErr == nil {
+			firstErr = err
+			closeTunnel()
+		}
 	}
-	return nil
+	closeTunnel()
+	if reverseProxyIsBenignTunnelError(firstErr) {
+		return nil
+	}
+
+	return firstErr
+
 }
 
 func (p *reverseProxyHandler) flushInterval(res *http.Response) time.Duration {
@@ -902,7 +920,7 @@ func (p *reverseProxyHandler) copyBuffer(dst io.Writer, src io.Reader, buf []byt
 	var written int64
 	for {
 		nr, rerr := src.Read(buf)
-		if rerr != nil && !errors.Is(rerr, io.EOF) && !errors.Is(rerr, context.Canceled) {
+		if rerr != nil && !errors.Is(rerr, io.EOF) && !reverseProxyIsBenignTunnelError(rerr) {
 			p.logf(nil, "reverse proxy read error during body copy: %v", rerr)
 		}
 		if nr > 0 {
@@ -1371,7 +1389,19 @@ func reverseProxyShouldPanicOnCopyError(req *http.Request) bool {
 }
 
 func reverseProxyIsBenignTunnelError(err error) bool {
-	return err == nil || errors.Is(err, errReverseProxyCopyDone) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler)
+	return err == nil || errors.Is(err, errReverseProxyCopyDone) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler) || reverseProxyIsClosedBodyError(err)
+}
+
+func reverseProxyIsClosedBodyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Error() {
+	case "body closed by handler", "http2: response body closed", "response body closed":
+		return true
+	default:
+		return false
+	}
 }
 
 func reverseProxyBaseResponseWriter(writer ResponseWriter) http.ResponseWriter {

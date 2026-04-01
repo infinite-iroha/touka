@@ -967,6 +967,223 @@ func TestReverseProxyHTTP2ExtendedConnect(t *testing.T) {
 	}
 }
 
+func TestReverseProxyHTTP2ExtendedConnectAllowsHalfClose(t *testing.T) {
+	t.Helper()
+
+	enableHTTP2ExtendedConnectProtocol()
+
+	errCh := make(chan error, 4)
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			errCh <- fmt.Errorf("unexpected upstream method: %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		controller := http.NewResponseController(w)
+		if err := controller.EnableFullDuplex(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			errCh <- fmt.Errorf("enable full duplex failed: %w", err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = controller.Flush()
+
+		reader := bufio.NewReader(r.Body)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- fmt.Errorf("read tunneled request body failed: %w", err)
+			return
+		}
+		if _, err := io.WriteString(w, "ack:"+line); err != nil {
+			errCh <- fmt.Errorf("write immediate tunneled response failed: %w", err)
+			return
+		}
+		_ = controller.Flush()
+
+		if _, err := io.Copy(io.Discard, reader); err != nil {
+			errCh <- fmt.Errorf("wait for request half-close failed: %w", err)
+			return
+		}
+		if _, err := io.WriteString(w, "after-close\n"); err != nil {
+			errCh <- fmt.Errorf("write post-close tunneled response failed: %w", err)
+			return
+		}
+		_ = controller.Flush()
+	}))
+	upstream.EnableHTTP2 = true
+	if err := configureHTTP2ExtendedConnectServer(upstream.Config); err != nil {
+		t.Fatalf("configure upstream HTTP/2 server: %v", err)
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	engine := New()
+	engine.Handle(http.MethodConnect, "/ws", ReverseProxy(ReverseProxyConfig{
+		Target:    mustParseURL(t, upstream.URL),
+		Transport: &http2.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Via:       "proxy.test",
+	}))
+
+	proxy := httptest.NewUnstartedServer(engine)
+	proxy.EnableHTTP2 = true
+	if err := configureHTTP2ExtendedConnectServer(proxy.Config); err != nil {
+		t.Fatalf("configure proxy HTTP/2 server: %v", err)
+	}
+	proxy.StartTLS()
+	defer proxy.Close()
+
+	transport := &http2.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	defer transport.CloseIdleConnections()
+
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodConnect, proxy.URL+"/ws", pr)
+	if err != nil {
+		t.Fatalf("new CONNECT request: %v", err)
+	}
+	req.Header.Set(":protocol", "websocket")
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip extended CONNECT: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	if _, err := io.WriteString(pw, "ping\n"); err != nil {
+		t.Fatalf("write tunneled request body: %v", err)
+	}
+	message, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read immediate tunneled response: %v", err)
+	}
+	if message != "ack:ping\n" {
+		t.Fatalf("unexpected immediate tunneled response: %q", message)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close tunneled request body: %v", err)
+	}
+
+	message, err = reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read post-close tunneled response: %v", err)
+	}
+	if message != "after-close\n" {
+		t.Fatalf("unexpected post-close tunneled response: %q", message)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+}
+
+func TestReverseProxyHTTP2ExtendedConnectCancelDoesNotTriggerProxyError(t *testing.T) {
+	t.Helper()
+
+	enableHTTP2ExtendedConnectProtocol()
+
+	errCh := make(chan error, 4)
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			errCh <- fmt.Errorf("unexpected upstream method: %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		controller := http.NewResponseController(w)
+		if err := controller.EnableFullDuplex(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			errCh <- fmt.Errorf("enable full duplex failed: %w", err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = controller.Flush()
+
+		<-r.Context().Done()
+	}))
+	upstream.EnableHTTP2 = true
+	if err := configureHTTP2ExtendedConnectServer(upstream.Config); err != nil {
+		t.Fatalf("configure upstream HTTP/2 server: %v", err)
+	}
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	proxyErrCh := make(chan error, 1)
+	engine := New()
+	engine.Handle(http.MethodConnect, "/ws", ReverseProxy(ReverseProxyConfig{
+		Target:    mustParseURL(t, upstream.URL),
+		Transport: &http2.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Via:       "proxy.test",
+		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+			select {
+			case proxyErrCh <- err:
+			default:
+			}
+		},
+	}))
+
+	proxy := httptest.NewUnstartedServer(engine)
+	proxy.EnableHTTP2 = true
+	if err := configureHTTP2ExtendedConnectServer(proxy.Config); err != nil {
+		t.Fatalf("configure proxy HTTP/2 server: %v", err)
+	}
+	proxy.StartTLS()
+	defer proxy.Close()
+
+	transport := &http2.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	defer transport.CloseIdleConnections()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, proxy.URL+"/ws", pr)
+	if err != nil {
+		t.Fatalf("new CONNECT request: %v", err)
+	}
+	req.Header.Set(":protocol", "websocket")
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip extended CONNECT: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(pw, strings.Repeat("x", 1<<20))
+		writeErrCh <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	_ = pw.CloseWithError(context.Canceled)
+	select {
+	case <-writeErrCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request body writer to unblock")
+	}
+
+	select {
+	case err := <-proxyErrCh:
+		t.Fatalf("proxy error handler should not be called on cancellation, got: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+}
+
 func TestReverseProxyAbortsStreamingCopyFailure(t *testing.T) {
 	t.Helper()
 
