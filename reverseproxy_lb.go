@@ -57,7 +57,10 @@ type reverseProxyUpstream struct {
 	key                      string
 	target                   *url.URL
 	index                    int
+	useH2C                   bool
 	extendedConnectTransport http.RoundTripper
+	bridgeTransport          http.RoundTripper
+	h2cTransport             http.RoundTripper
 	inFlight                 atomic.Int64
 
 	passiveMu sync.Mutex

@@ -6,6 +6,8 @@ package touka
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -52,9 +54,10 @@ type ReverseProxyConfig struct {
 	LoadBalancing ReverseProxyLoadBalancingConfig
 	PassiveHealth ReverseProxyPassiveHealthConfig
 
-	Transport     http.RoundTripper
-	FlushInterval time.Duration
-	BufferPool    BufferPool
+	Transport        http.RoundTripper
+	FlushInterval    time.Duration
+	BufferPool       BufferPool
+	AllowH2CUpstream bool
 
 	ModifyRequest  func(*http.Request)
 	ModifyResponse func(*http.Response) error
@@ -84,6 +87,34 @@ type reverseProxyHandler struct {
 type reverseProxyStatusError struct {
 	status int
 	err    error
+}
+
+type reverseProxyExtendedConnectBridge struct {
+	body io.ReadCloser
+}
+
+type reverseProxyH2ReadWriteCloser struct {
+	io.ReadCloser
+	ResponseWriter
+	controller *http.ResponseController
+}
+
+func (rwc *reverseProxyH2ReadWriteCloser) Write(p []byte) (int, error) {
+	n, err := rwc.ResponseWriter.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if err := rwc.controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return n, err
+	}
+	return n, nil
+}
+
+func (rwc *reverseProxyH2ReadWriteCloser) Close() error {
+	if rwc.ReadCloser == nil {
+		return nil
+	}
+	return rwc.ReadCloser.Close()
 }
 
 func (e *reverseProxyStatusError) Error() string {
@@ -314,7 +345,7 @@ func (p *reverseProxyHandler) serveUpstreamAttempt(c *Context, ctx context.Conte
 	}
 	defer cleanup()
 
-	transport := p.transportForUpstream(c.Request, upstream)
+	transport := p.transportForUpstream(outreq, upstream)
 	rawWriter := reverseProxyBaseResponseWriter(c.Writer)
 	var (
 		roundTripMu   sync.Mutex
@@ -351,6 +382,20 @@ func (p *reverseProxyHandler) serveUpstreamAttempt(c *Context, ctx context.Conte
 	}
 	if reverseProxyStatusIsUnhealthy(p.config.PassiveHealth, res.StatusCode) {
 		upstream.recordFailure(time.Now(), p.config.PassiveHealth)
+	}
+
+	if bridge := reverseProxyExtendedConnectBridgeFromContext(outreq.Context()); bridge != nil {
+		if res.StatusCode == http.StatusSwitchingProtocols {
+			appendViaHeader(res.Header, reverseProxyViaProtocol(res.ProtoMajor, res.ProtoMinor, res.Proto), p.receivedBy)
+			if !p.modifyResponse(c, res, outreq) {
+				return true, nil, false
+			}
+			if err := p.handleBridgedExtendedConnectResponse(c, outreq, res, bridge); err != nil {
+				return false, err, false
+			}
+			return true, nil, false
+		}
+		return false, &reverseProxyStatusError{status: http.StatusBadGateway, err: fmt.Errorf("extended CONNECT backend returned status %d instead of 101", res.StatusCode)}, false
 	}
 
 	if outreq.Method == http.MethodConnect && res.StatusCode >= http.StatusOK && res.StatusCode < http.StatusMultipleChoices {
@@ -435,6 +480,13 @@ func (p *reverseProxyHandler) serveUpstreamAttempt(c *Context, ctx context.Conte
 
 func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Context, upstream *reverseProxyUpstream, updatedMaxForwards string) (*http.Request, *io.PipeWriter, func(), error) {
 	outreq := c.Request.Clone(ctx)
+	bridgeCtx, bridged, err := reverseProxyPrepareExtendedConnectBridge(outreq)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if bridged {
+		outreq = outreq.WithContext(bridgeCtx)
+	}
 	if outreq.Method == http.MethodConnect || c.Request.ContentLength == 0 {
 		outreq.Body = nil
 	} else if c.Request.GetBody != nil {
@@ -451,7 +503,7 @@ func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Conte
 	}
 	outreq.Close = false
 	var connectWriter *io.PipeWriter
-	if outreq.Method == http.MethodConnect {
+	if outreq.Method == http.MethodConnect && !bridged {
 		pipeReader, pipeWriter := io.Pipe()
 		outreq.Body = pipeReader
 		outreq.ContentLength = -1
@@ -466,18 +518,10 @@ func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Conte
 		}
 	}
 
-	if outreq.Method == http.MethodConnect {
-		if reverseProxyIsExtendedConnectRequest(outreq) {
-			rewriteReverseProxyURL(outreq, upstream.target)
-			if !p.config.PreserveHost {
-				outreq.Host = ""
-			}
-			outreq.URL.RawQuery = cleanReverseProxyQueryParams(outreq.URL.RawQuery)
-		} else {
-			if err := rewriteReverseProxyConnectRequest(outreq, upstream.target); err != nil {
-				cleanup()
-				return nil, nil, nil, err
-			}
+	if outreq.Method == http.MethodConnect && !reverseProxyIsExtendedConnectRequest(outreq) {
+		if err := rewriteReverseProxyConnectRequest(outreq, upstream.target); err != nil {
+			cleanup()
+			return nil, nil, nil, err
 		}
 	} else {
 		rewriteReverseProxyURL(outreq, upstream.target)
@@ -525,6 +569,15 @@ func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Conte
 func (p *reverseProxyHandler) transportForUpstream(req *http.Request, upstream *reverseProxyUpstream) http.RoundTripper {
 	if p.config.Transport != nil {
 		return p.config.Transport
+	}
+	if reverseProxyExtendedConnectBridgeFromContext(req.Context()) != nil {
+		if upstream.bridgeTransport != nil {
+			return upstream.bridgeTransport
+		}
+		return http.DefaultTransport
+	}
+	if upstream.useH2C && upstream.h2cTransport != nil {
+		return upstream.h2cTransport
 	}
 	if reverseProxyIsExtendedConnectRequest(req) && upstream.extendedConnectTransport != nil {
 		return upstream.extendedConnectTransport
@@ -915,6 +968,73 @@ func (p *reverseProxyHandler) handleConnectResponse(c *Context, req *http.Reques
 	return firstErr
 }
 
+func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, req *http.Request, res *http.Response, bridge *reverseProxyExtendedConnectBridge) error {
+	if c == nil || c.Request == nil {
+		res.Body.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: errors.New("extended CONNECT bridge requires a valid request context")}
+	}
+	backConn, ok := res.Body.(io.ReadWriteCloser)
+	if !ok {
+		res.Body.Close()
+		return &reverseProxyStatusError{
+			status: http.StatusBadGateway,
+			err:    errors.New("backend returned bridged websocket response without writable body"),
+		}
+	}
+
+	controller := http.NewResponseController(reverseProxyBaseResponseWriter(c.Writer))
+	if err := controller.EnableFullDuplex(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		backConn.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	responseHeader := c.Writer.Header()
+	reverseProxyCopyHeader(responseHeader, res.Header)
+	removeHopByHopHeaders(responseHeader)
+	responseHeader.Del("Sec-WebSocket-Accept")
+	c.Writer.WriteHeader(http.StatusOK)
+	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		backConn.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	conn := &reverseProxyH2ReadWriteCloser{ReadCloser: bridge.body, ResponseWriter: c.Writer, controller: controller}
+
+	var closeOnce sync.Once
+	closeTunnel := func() {
+		closeOnce.Do(func() {
+			_ = conn.Close()
+			_ = backConn.Close()
+		})
+	}
+	go func() {
+		<-req.Context().Done()
+		closeTunnel()
+	}()
+
+	errc := make(chan error, 2)
+	copyer := switchProtocolCopier{user: conn, backend: backConn}
+	go copyer.copyToBackend(errc)
+	go copyer.copyFromBackend(errc)
+
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		err := <-errc
+		if reverseProxyIsBenignTunnelError(err) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+			closeTunnel()
+		}
+	}
+	closeTunnel()
+	if reverseProxyIsBenignTunnelError(firstErr) {
+		return nil
+	}
+	return firstErr
+}
+
 func (p *reverseProxyHandler) handleExtendedConnectResponse(c *Context, req *http.Request, res *http.Response, backWrite *io.PipeWriter) error {
 	if c == nil || c.Request == nil {
 		res.Body.Close()
@@ -1128,13 +1248,23 @@ func buildReverseProxyUpstreams(config ReverseProxyConfig) ([]*reverseProxyUpstr
 
 	upstreams := make([]*reverseProxyUpstream, 0, len(targets))
 	for i, target := range targets {
+		useH2C := strings.EqualFold(target.Scheme, "h2c")
+		if useH2C {
+			target = cloneReverseProxyURL(target)
+			target.Scheme = "http"
+		}
 		upstream := &reverseProxyUpstream{
 			key:    fmt.Sprintf("%d:%s", i, target.String()),
 			target: target,
 			index:  i,
+			useH2C: useH2C || config.AllowH2CUpstream,
 		}
 		if config.Transport == nil {
-			upstream.extendedConnectTransport = newHTTP2ExtendedConnectTransport(target)
+			upstream.extendedConnectTransport = newHTTP2ExtendedConnectTransport()
+			upstream.bridgeTransport = newHTTP1BridgeTransport()
+			if upstream.useH2C {
+				upstream.h2cTransport = newH2CTransport()
+			}
 		}
 		upstreams = append(upstreams, upstream)
 	}
@@ -1235,6 +1365,48 @@ func buildForwardedHeaderValue(clientIP, by, host, scheme string) string {
 
 func reverseProxyUsesForwardedHeader(policy ForwardedHeadersPolicy) bool {
 	return policy == ForwardedBoth || policy == ForwardedRFC7239Only
+}
+
+func reverseProxyPrepareExtendedConnectBridge(req *http.Request) (context.Context, bool, error) {
+	if req == nil {
+		return context.Background(), false, nil
+	}
+	protocol := reverseProxyExtendedConnectProtocol(req)
+	if req.Method != http.MethodConnect || protocol == "" || !strings.EqualFold(protocol, "websocket") {
+		return req.Context(), false, nil
+	}
+
+	bridge := &reverseProxyExtendedConnectBridge{body: req.Body}
+	ctx := context.WithValue(req.Context(), reverseProxyExtendedConnectBridge{}, bridge)
+	req.Header.Del(":protocol")
+	req.Method = http.MethodGet
+	req.Body = http.NoBody
+	req.ContentLength = 0
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	key, err := reverseProxyGenerateWebSocketKey()
+	if err != nil {
+		return nil, false, fmt.Errorf("reverse proxy failed to generate websocket key: %w", err)
+	}
+	req.Header.Set("Sec-WebSocket-Key", key)
+	return ctx, true, nil
+}
+
+func reverseProxyExtendedConnectBridgeFromContext(ctx context.Context) *reverseProxyExtendedConnectBridge {
+	if ctx == nil {
+		return nil
+	}
+	bridge, _ := ctx.Value(reverseProxyExtendedConnectBridge{}).(*reverseProxyExtendedConnectBridge)
+	return bridge
+}
+
+func reverseProxyGenerateWebSocketKey() (string, error) {
+	key := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(key), nil
 }
 
 func reverseProxyIsExtendedConnectRequest(req *http.Request) bool {

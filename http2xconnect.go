@@ -5,13 +5,11 @@
 package touka
 
 import (
-	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
+	"time"
 	_ "unsafe"
 
 	"golang.org/x/net/http2"
@@ -36,18 +34,55 @@ func configureHTTP2ExtendedConnectServer(srv *http.Server) error {
 	return http2.ConfigureServer(srv, nil)
 }
 
-func newHTTP2ExtendedConnectTransport(target *url.URL) http.RoundTripper {
+func newHTTP2ExtendedConnectTransport() http.RoundTripper {
 	enableHTTP2ExtendedConnectProtocol()
+	transport := cloneDefaultTransport()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(true)
+	return transport
+}
 
-	transport := &http2.Transport{}
-	if target == nil || !strings.EqualFold(target.Scheme, "http") {
-		return transport
+func newHTTP1BridgeTransport() http.RoundTripper {
+	return newHTTP1BridgeTransportWithTLSConfig(&tls.Config{NextProtos: []string{"http/1.1"}})
+}
+
+func newHTTP1BridgeTransportWithTLSConfig(tlsConfig *tls.Config) http.RoundTripper {
+	transport := cloneDefaultTransport()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	if tlsConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = tlsConfig.Clone()
 	}
-
-	transport.AllowHTTP = true
-	transport.DialTLSContext = func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-		var dialer net.Dialer
-		return dialer.DialContext(ctx, network, addr)
+	if len(transport.TLSClientConfig.NextProtos) == 0 {
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
 	return transport
+}
+
+func newH2CTransport() http.RoundTripper {
+	transport := cloneDefaultTransport()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetUnencryptedHTTP2(true)
+	return transport
+}
+
+func cloneDefaultTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		return transport.Clone()
+	}
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
