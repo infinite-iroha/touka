@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1662,14 +1663,24 @@ func TestReverseProxyHTTP2ExtendedConnectBridgeClosesBackendOnce(t *testing.T) {
 	enableHTTP2ExtendedConnectProtocol()
 
 	closeCalls := atomic.Int32{}
+	backendReadDone := make(chan struct{}, 1)
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodGet {
 			return nil, fmt.Errorf("unexpected upstream method: %s", req.Method)
 		}
-		backend := &countingReadWriteCloser{
-			readData:      []byte("echo:ping\n"),
+		var respondOnce sync.Once
+		var backend *countingReadWriteCloser
+		backend = &countingReadWriteCloser{
+			readDataCh:    make(chan []byte, 1),
 			closeCalls:    &closeCalls,
-			closeWriteErr: http.ErrNotSupported,
+			closeWriteErr: nil,
+			afterWrite: func() {
+				respondOnce.Do(func() {
+					backendReadDone <- struct{}{}
+					backend.readDataCh <- []byte("echo:ping\n")
+					close(backend.readDataCh)
+				})
+			},
 		}
 		return &http.Response{
 			StatusCode: http.StatusSwitchingProtocols,
@@ -1718,6 +1729,12 @@ func TestReverseProxyHTTP2ExtendedConnectBridgeClosesBackendOnce(t *testing.T) {
 	if _, err := io.WriteString(pw, "ping\n"); err != nil {
 		_ = resp.Body.Close()
 		t.Fatalf("write tunneled request body: %v", err)
+	}
+	select {
+	case <-backendReadDone:
+	case <-time.After(2 * time.Second):
+		_ = resp.Body.Close()
+		t.Fatal("backend did not receive tunneled request body")
 	}
 	message, err := bufio.NewReader(resp.Body).ReadString('\n')
 	if err != nil {
@@ -2428,12 +2445,21 @@ func (r errorReader) Read([]byte) (int, error) {
 
 type countingReadWriteCloser struct {
 	readData      []byte
+	readDataCh    chan []byte
 	writeBuf      bytes.Buffer
 	closeCalls    *atomic.Int32
 	closeWriteErr error
+	afterWrite    func()
 }
 
 func (r *countingReadWriteCloser) Read(p []byte) (int, error) {
+	if len(r.readData) == 0 && r.readDataCh != nil {
+		data, ok := <-r.readDataCh
+		if !ok {
+			return 0, io.EOF
+		}
+		r.readData = data
+	}
 	if len(r.readData) == 0 {
 		return 0, io.EOF
 	}
@@ -2443,7 +2469,11 @@ func (r *countingReadWriteCloser) Read(p []byte) (int, error) {
 }
 
 func (r *countingReadWriteCloser) Write(p []byte) (int, error) {
-	return r.writeBuf.Write(p)
+	n, err := r.writeBuf.Write(p)
+	if err == nil && r.afterWrite != nil {
+		r.afterWrite()
+	}
+	return n, err
 }
 
 func (r *countingReadWriteCloser) Close() error {

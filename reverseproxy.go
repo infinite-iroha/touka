@@ -518,24 +518,10 @@ func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Conte
 		}
 	}
 
-	if outreq.Method == http.MethodConnect {
-		if bridged {
-			rewriteReverseProxyURL(outreq, upstream.target)
-			if !p.config.PreserveHost {
-				outreq.Host = ""
-			}
-			outreq.URL.RawQuery = cleanReverseProxyQueryParams(outreq.URL.RawQuery)
-		} else if reverseProxyIsExtendedConnectRequest(outreq) {
-			rewriteReverseProxyURL(outreq, upstream.target)
-			if !p.config.PreserveHost {
-				outreq.Host = ""
-			}
-			outreq.URL.RawQuery = cleanReverseProxyQueryParams(outreq.URL.RawQuery)
-		} else {
-			if err := rewriteReverseProxyConnectRequest(outreq, upstream.target); err != nil {
-				cleanup()
-				return nil, nil, nil, err
-			}
+	if outreq.Method == http.MethodConnect && !reverseProxyIsExtendedConnectRequest(outreq) {
+		if err := rewriteReverseProxyConnectRequest(outreq, upstream.target); err != nil {
+			cleanup()
+			return nil, nil, nil, err
 		}
 	} else {
 		rewriteReverseProxyURL(outreq, upstream.target)
@@ -1014,26 +1000,35 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 
 	conn := &reverseProxyH2ReadWriteCloser{ReadCloser: bridge.body, ResponseWriter: c.Writer, controller: controller}
 
-	backConnClosed := make(chan struct{})
+	var closeOnce sync.Once
+	closeTunnel := func() {
+		closeOnce.Do(func() {
+			_ = conn.Close()
+			_ = backConn.Close()
+		})
+	}
 	go func() {
-		select {
-		case <-req.Context().Done():
-		case <-backConnClosed:
-		}
-		backConn.Close()
+		<-req.Context().Done()
+		closeTunnel()
 	}()
-	defer close(backConnClosed)
-	defer conn.Close()
 
 	errc := make(chan error, 2)
 	copyer := switchProtocolCopier{user: conn, backend: backConn}
 	go copyer.copyToBackend(errc)
 	go copyer.copyFromBackend(errc)
 
-	firstErr := <-errc
-	if firstErr == nil {
-		firstErr = <-errc
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		err := <-errc
+		if reverseProxyIsBenignTunnelError(err) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+			closeTunnel()
+		}
 	}
+	closeTunnel()
 	if reverseProxyIsBenignTunnelError(firstErr) {
 		return nil
 	}
