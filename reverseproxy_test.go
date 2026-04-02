@@ -836,9 +836,10 @@ func TestReverseProxyH2ReadWriteCloserWriteReturnsWrittenCountOnFlushError(t *te
 
 	flushErr := errors.New("flush failed")
 	writer := &flushErrorResponseWriter{flushErr: flushErr}
-	conn := reverseProxyH2ReadWriteCloser{
+	conn := &reverseProxyH2ReadWriteCloser{
 		ReadCloser:     io.NopCloser(strings.NewReader("")),
 		ResponseWriter: writer,
+		controller:     http.NewResponseController(reverseProxyBaseResponseWriter(writer)),
 	}
 
 	n, err := conn.Write([]byte("ping"))
