@@ -5,12 +5,8 @@
 package touka
 
 import (
-	"context"
 	"crypto/tls"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	_ "unsafe"
 
@@ -36,18 +32,36 @@ func configureHTTP2ExtendedConnectServer(srv *http.Server) error {
 	return http2.ConfigureServer(srv, nil)
 }
 
-func newHTTP2ExtendedConnectTransport(target *url.URL) http.RoundTripper {
+func newHTTP2ExtendedConnectTransport() http.RoundTripper {
 	enableHTTP2ExtendedConnectProtocol()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(true)
+	return transport
+}
 
-	transport := &http2.Transport{}
-	if target == nil || !strings.EqualFold(target.Scheme, "http") {
-		return transport
-	}
+func newHTTP1BridgeTransport() http.RoundTripper {
+	return newHTTP1BridgeTransportWithTLSConfig(&tls.Config{NextProtos: []string{"http/1.1"}})
+}
 
-	transport.AllowHTTP = true
-	transport.DialTLSContext = func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-		var dialer net.Dialer
-		return dialer.DialContext(ctx, network, addr)
+func newHTTP1BridgeTransportWithTLSConfig(tlsConfig *tls.Config) http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.TLSClientConfig = tlsConfig
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
 	}
+	if len(transport.TLSClientConfig.NextProtos) == 0 {
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
+	return transport
+}
+
+func newH2CTransport() http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetUnencryptedHTTP2(true)
 	return transport
 }

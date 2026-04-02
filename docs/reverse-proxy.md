@@ -68,6 +68,7 @@ type ReverseProxyConfig struct {
     Transport     http.RoundTripper
     FlushInterval time.Duration
     BufferPool    BufferPool
+    AllowH2CUpstream bool
 
     ModifyRequest  func(*http.Request)
     ModifyResponse func(*http.Response) error
@@ -190,6 +191,24 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
     },
 }))
 ```
+
+### `AllowH2CUpstream`
+
+允许代理使用未加密 HTTP/2（h2c）与 `http://` upstream 通信。
+
+- 默认关闭
+- 这是一个显式配置项
+- 启用后，Touka 会为该 upstream 使用 h2c prior-knowledge 方式连接上游
+- 这意味着上游本身也必须显式支持 h2c；它不是“先试 h2c，失败再自动回退到 h1”的协商模式
+
+```go
+r.GET("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
+    Target:           target,
+    AllowH2CUpstream: true,
+}))
+```
+
+对于下游 HTTP/2 extended `CONNECT` websocket 场景，Touka 会只在该特殊桥接路径上强制与上游使用 HTTP/1.1 websocket upgrade，以匹配 Caddy 风格的桥接语义；普通 HTTP 请求不会因为这个特性而被强制降级为 HTTP/1.1。
 
 ### `Transport`
 
