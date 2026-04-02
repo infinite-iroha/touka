@@ -101,10 +101,10 @@ type reverseProxyH2ReadWriteCloser struct {
 func (rwc reverseProxyH2ReadWriteCloser) Write(p []byte) (int, error) {
 	n, err := rwc.ResponseWriter.Write(p)
 	if err != nil {
-		return 0, err
+		return n, err
 	}
 	if err := http.NewResponseController(reverseProxyBaseResponseWriter(rwc.ResponseWriter)).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		return 0, err
+		return n, err
 	}
 	return n, nil
 }
@@ -479,7 +479,10 @@ func (p *reverseProxyHandler) serveUpstreamAttempt(c *Context, ctx context.Conte
 
 func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Context, upstream *reverseProxyUpstream, updatedMaxForwards string) (*http.Request, *io.PipeWriter, func(), error) {
 	outreq := c.Request.Clone(ctx)
-	bridgeCtx, bridged := reverseProxyPrepareExtendedConnectBridge(outreq)
+	bridgeCtx, bridged, err := reverseProxyPrepareExtendedConnectBridge(outreq)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	if bridged {
 		outreq = outreq.WithContext(bridgeCtx)
 	}
@@ -1370,13 +1373,13 @@ func reverseProxyUsesForwardedHeader(policy ForwardedHeadersPolicy) bool {
 	return policy == ForwardedBoth || policy == ForwardedRFC7239Only
 }
 
-func reverseProxyPrepareExtendedConnectBridge(req *http.Request) (context.Context, bool) {
+func reverseProxyPrepareExtendedConnectBridge(req *http.Request) (context.Context, bool, error) {
 	protocol := reverseProxyExtendedConnectProtocol(req)
 	if req == nil || req.Method != http.MethodConnect || protocol == "" || !strings.EqualFold(protocol, "websocket") {
 		if req == nil {
-			return context.Background(), false
+			return context.Background(), false, nil
 		}
-		return req.Context(), false
+		return req.Context(), false, nil
 	}
 
 	bridge := &reverseProxyExtendedConnectBridge{body: req.Body}
@@ -1389,10 +1392,11 @@ func reverseProxyPrepareExtendedConnectBridge(req *http.Request) (context.Contex
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	key, err := reverseProxyGenerateWebSocketKey()
-	if err == nil {
-		req.Header.Set("Sec-WebSocket-Key", key)
+	if err != nil {
+		return nil, false, fmt.Errorf("reverse proxy failed to generate websocket key: %w", err)
 	}
-	return ctx, true
+	req.Header.Set("Sec-WebSocket-Key", key)
+	return ctx, true, nil
 }
 
 func reverseProxyExtendedConnectBridgeFromContext(ctx context.Context) *reverseProxyExtendedConnectBridge {
@@ -1405,7 +1409,7 @@ func reverseProxyExtendedConnectBridgeFromContext(ctx context.Context) *reverseP
 
 func reverseProxyGenerateWebSocketKey() (string, error) {
 	key := make([]byte, 16)
-	if _, err := rand.Read(key); err != nil {
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(key), nil
