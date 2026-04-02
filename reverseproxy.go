@@ -1004,8 +1004,7 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 
 	responseHeader := c.Writer.Header()
 	reverseProxyCopyHeader(responseHeader, res.Header)
-	responseHeader.Del("Upgrade")
-	responseHeader.Del("Connection")
+	removeHopByHopHeaders(responseHeader)
 	responseHeader.Del("Sec-WebSocket-Accept")
 	c.Writer.WriteHeader(http.StatusOK)
 	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
