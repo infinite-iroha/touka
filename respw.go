@@ -113,7 +113,7 @@ func (rw *responseWriterImpl) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	// 尝试从底层 ResponseWriter 获取 Hijacker 接口
 	hj, ok := rw.ResponseWriter.(http.Hijacker)
 	if !ok {
-		return nil, nil, errors.New("http.Hijacker interface not supported")
+		return nil, nil, http.ErrNotSupported
 	}
 
 	// 调用底层的 Hijack 方法

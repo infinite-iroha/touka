@@ -22,6 +22,8 @@ r.ANY("/any", handle)
 r.HandleFunc([]string{"GET", "POST"}, "/multi", handle)
 ```
 
+服务器级 `OPTIONS *` 请求不需要单独注册路由。Touka 会直接返回一个空的 `200 OK` 响应，而不会把它当成 `/` 路由来匹配。
+
 ## 路径参数 (Named Parameters)
 
 使用冒号 `:` 定义路径参数。参数值可以通过 `c.Param(key)` 获取。

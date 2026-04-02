@@ -7,6 +7,7 @@ package touka
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"runtime"
 	"strings"
@@ -344,6 +345,11 @@ func (engine *Engine) setProtocols(config *ProtocolsConfig) {
 func (engine *Engine) applyDefaultServerConfig(srv *http.Server) {
 	if engine.serverProtocols != nil {
 		srv.Protocols = engine.serverProtocols
+		if engine.serverProtocols.HTTP2() || engine.serverProtocols.UnencryptedHTTP2() {
+			if err := configureHTTP2ExtendedConnectServer(srv); err != nil {
+				panic(err)
+			}
+		}
 	}
 }
 
@@ -475,21 +481,12 @@ func PutTempSkippedNodes(skippedNodes *[]skippedNode) {
 func MethodNotAllowed() HandlerFunc {
 	return func(c *Context) {
 		httpMethod := c.Request.Method
-		requestPath := c.Request.URL.Path
+		requestPath := routeLookupPath(c.Request)
 		engine := c.engine
 		// 是否是OPTIONS方式
 		if httpMethod == http.MethodOptions {
 			// 如果是 OPTIONS 请求,尝试查找所有允许的方法
-			allowedMethods := []string{}
-			for _, treeIter := range engine.methodTrees {
-				// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-				tempSkippedNodes := GetTempSkippedNodes()
-				value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
-				PutTempSkippedNodes(tempSkippedNodes)
-				if value.handlers != nil {
-					allowedMethods = append(allowedMethods, treeIter.method)
-				}
-			}
+			allowedMethods := engine.allowedMethodsForPath(requestPath)
 			if len(allowedMethods) > 0 {
 				// 如果找到了允许的方法,返回 200 OK 并设置 Allow 头部
 				c.Writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
@@ -704,8 +701,13 @@ func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // handleRequest 负责根据请求查找路由并执行相应的处理函数链
 // 这是路由查找和执行的核心逻辑
 func (engine *Engine) handleRequest(c *Context) {
+	if isGeneralOptionsRequest(c.Request) {
+		engine.handleGeneralOptions(c)
+		return
+	}
+
 	httpMethod := c.Request.Method
-	requestPath := c.Request.URL.Path
+	requestPath := routeLookupPath(c.Request)
 
 	// 查找对应的路由树的根节点
 	rootNode := engine.methodTrees.get(httpMethod) // 这里获取到的 rootNode 已经是 *node 类型
@@ -725,7 +727,7 @@ func (engine *Engine) handleRequest(c *Context) {
 		}
 
 		// 如果没有找到处理函数,检查是否需要重定向（尾部斜杠或大小写修复）
-		if httpMethod != http.MethodConnect && requestPath != "/" { // CONNECT 方法和根路径不进行重定向
+		if httpMethod != http.MethodConnect && requestPath != "/" && !isGeneralOptionsRequest(c.Request) { // CONNECT 方法、服务器级 OPTIONS 和根路径不进行重定向
 			if value.tsr && engine.RedirectTrailingSlash {
 				// 尾部斜杠重定向：/foo/ -> /foo 或 /foo -> /foo/
 				redirectPath := requestPath
@@ -780,6 +782,55 @@ func (engine *Engine) handleRequest(c *Context) {
 	c.handlers = handlers
 	c.Next() // 执行处理函数链
 	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+}
+
+func routeLookupPath(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+
+	if req.Method == http.MethodConnect && req.RequestURI != "" && req.RequestURI != "*" && !strings.HasPrefix(req.RequestURI, "/") && !strings.Contains(req.RequestURI, "://") {
+		return "/" + req.RequestURI
+	}
+	if isGeneralOptionsRequest(req) {
+		return ""
+	}
+	if req.URL == nil {
+		return ""
+	}
+	return req.URL.Path
+}
+
+func isGeneralOptionsRequest(req *http.Request) bool {
+	return req != nil && req.Method == http.MethodOptions && req.RequestURI == "*"
+}
+
+func (engine *Engine) allowedMethodsForPath(requestPath string) []string {
+	allowedMethods := make([]string, 0, len(engine.methodTrees))
+	for _, treeIter := range engine.methodTrees {
+		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
+		tempSkippedNodes := GetTempSkippedNodes()
+		value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
+		PutTempSkippedNodes(tempSkippedNodes)
+		if value.handlers != nil {
+			allowedMethods = append(allowedMethods, treeIter.method)
+		}
+	}
+	return allowedMethods
+}
+
+func (engine *Engine) handleGeneralOptions(c *Context) {
+	if c == nil || c.Request == nil {
+		return
+	}
+
+	c.Writer.Header().Set("Content-Length", "0")
+	if c.Request.ContentLength != 0 {
+		mb := http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
+		_, _ = io.Copy(io.Discard, mb)
+	}
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Abort()
 }
 
 // Context 返回 Engine 的根上下文, 该上下文在服务器优雅关闭时会被取消.

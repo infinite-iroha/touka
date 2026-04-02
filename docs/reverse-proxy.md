@@ -59,7 +59,11 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
 
 ```go
 type ReverseProxyConfig struct {
-    Target *url.URL
+    Target  *url.URL
+    Targets []string
+
+    LoadBalancing ReverseProxyLoadBalancingConfig
+    PassiveHealth ReverseProxyPassiveHealthConfig
 
     Transport     http.RoundTripper
     FlushInterval time.Duration
@@ -78,10 +82,113 @@ type ReverseProxyConfig struct {
 
 ### `Target`
 
-必填。表示后端目标地址，至少需要提供 `scheme` 和 `host`。
+与 `Targets` 二选一。表示单个后端目标地址，至少需要提供 `scheme` 和 `host`。
 
 ```go
 target, _ := url.Parse("http://backend:9000")
+```
+
+### `Targets`
+
+可选。用于配置多个后端目标地址。
+
+- `Target` 与 `Targets` 互斥，只能使用其中一种
+- `Targets` 的每一项都必须是完整 URL
+- 每个 target 仍然可以自带 base path 和 query
+
+```go
+r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
+    Targets: []string{
+        "http://127.0.0.1:9001/base?from=a",
+        "http://127.0.0.1:9002/base?from=b",
+    },
+}))
+```
+
+这意味着不同 upstream 仍然可以保留各自的路径前缀和固定查询参数。
+
+### `LoadBalancing`
+
+用于配置 upstream 选择策略和重试行为。
+
+```go
+type ReverseProxyLoadBalancingConfig struct {
+    Policy      ReverseProxyLBPolicy
+    Retries     int
+    TryDuration time.Duration
+    TryInterval time.Duration
+}
+```
+
+当前内置策略：
+
+- `touka.LBRandom()`
+- `touka.LBRoundRobin()`
+- `touka.LBFirst()`
+- `touka.LBLeastConn()`
+- `touka.LBIPHash()`
+- `touka.LBClientIPHash()`
+- `touka.LBURIHash()`
+- `touka.LBHeader("X-Upstream", fallback)`
+- `touka.LBQuery("tenant", fallback)`
+
+其中：
+
+- `LBFirst()` 适合主备/故障转移顺序
+- `LBHeader` / `LBQuery` 只有在对应 header/query **缺失**时才会走 fallback
+- 如果 `LBHeader` / `LBQuery` 没有显式 fallback，则默认回退到 `LBRandom()`
+
+```go
+r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
+    Targets: []string{
+        "http://127.0.0.1:9001",
+        "http://127.0.0.1:9002",
+    },
+    LoadBalancing: touka.ReverseProxyLoadBalancingConfig{
+        Policy: touka.LBHeader("X-Upstream", touka.LBFirst()),
+        Retries: 1,
+    },
+}))
+```
+
+重试说明：
+
+- 只对未开始收到上游响应的失败进行重试
+- 默认仅对 RFC 定义的安全方法（`GET` / `HEAD` / `OPTIONS` / `TRACE`）重试
+- `Retries` 表示额外重试次数
+- `TryDuration` 表示总尝试时间预算；如果配置了它，会优先于重试次数控制停止时机
+- `TryInterval` 表示两次重试之间的等待间隔
+
+### `PassiveHealth`
+
+用于配置被动健康检查。它不会后台探测 upstream，而是根据真实代理请求的失败结果临时把某个 upstream 视为不健康。
+
+```go
+type ReverseProxyPassiveHealthConfig struct {
+    FailDuration    time.Duration
+    MaxFails        int
+    UnhealthyStatus []int
+}
+```
+
+- `FailDuration > 0` 时启用被动健康跟踪
+- `MaxFails <= 0` 时默认按 `1` 处理
+- `UnhealthyStatus` 中的状态码会被记为一次失败，但当前请求仍会先收到该响应；后续请求才会绕过这个 upstream
+
+```go
+r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
+    Targets: []string{
+        "http://127.0.0.1:9001",
+        "http://127.0.0.1:9002",
+    },
+    LoadBalancing: touka.ReverseProxyLoadBalancingConfig{
+        Policy: touka.LBFirst(),
+    },
+    PassiveHealth: touka.ReverseProxyPassiveHealthConfig{
+        FailDuration:    time.Minute,
+        UnhealthyStatus: []int{http.StatusServiceUnavailable},
+    },
+}))
 ```
 
 ### `Transport`
@@ -149,6 +256,8 @@ r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
 ### `ModifyRequest`
 
 在请求真正发往后端前，对出站请求做最后修改。
+
+如果启用了多 upstream 重试，`ModifyRequest` 可能会在同一个客户端请求里被调用多次：每一次实际发往 upstream 的尝试都会重新构造一份请求并再次执行它。因此，这个回调最好保持幂等，不要依赖“只会执行一次”的副作用。
 
 常见用途：
 
@@ -242,10 +351,19 @@ const (
 r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
     Target:           target,
     ForwardedHeaders: touka.ForwardedBoth,
-    ForwardedBy:      "gateway-1",
+    ForwardedBy:      "_gateway-1",
     Via:              "edge-1",
 }))
 ```
+
+如果您配置了 `ForwardedBy`，它必须是一个符合 RFC 7239 的 node identifier。
+
+- IPv4：`203.0.113.43`
+- IPv6 / 带端口：`[2001:db8::17]:443`
+- 匿名标识：`_gateway-1`
+- 未知：`unknown`
+
+像 `gateway-1` 这类普通 token 不再被视为合法的 `by=` 值。
 
 `Via` 不是“留空即禁用”的开关。当前实现中：
 
@@ -282,11 +400,14 @@ Touka 会尽量遵循代理链语义：
 
 Touka 的反向代理实现支持以下能力：
 
+- `CONNECT` 隧道转发（HTTP/1.x）
+- HTTP/2 extended `CONNECT`
 - `Connection: Upgrade` / `Upgrade` 协议升级转发
 - WebSocket 等 101 Switching Protocols 场景
 - SSE（Server-Sent Events）立即刷新
 - Trailer 透传
 - 1xx 响应透传
+- `TRACE` / `OPTIONS` 上的 `Max-Forwards` 递减与本地终止处理
 
 例如，代理 WebSocket 服务：
 
@@ -341,7 +462,7 @@ func main() {
     r.ANY("/api/*path", touka.ReverseProxy(touka.ReverseProxyConfig{
         Target:           target,
         ForwardedHeaders: touka.ForwardedBoth,
-        ForwardedBy:      "gateway-1",
+        ForwardedBy:      "_gateway-1",
         Via:              "gateway-1",
         FlushInterval:    100 * time.Millisecond,
         ModifyRequest: func(req *http.Request) {
