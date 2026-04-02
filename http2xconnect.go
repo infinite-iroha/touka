@@ -51,9 +51,10 @@ func newHTTP1BridgeTransportWithTLSConfig(tlsConfig *tls.Config) http.RoundTripp
 	transport := cloneDefaultTransport()
 	transport.Protocols = new(http.Protocols)
 	transport.Protocols.SetHTTP1(true)
-	transport.TLSClientConfig = tlsConfig
-	if transport.TLSClientConfig == nil {
+	if tlsConfig == nil {
 		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = tlsConfig.Clone()
 	}
 	if len(transport.TLSClientConfig.NextProtos) == 0 {
 		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}

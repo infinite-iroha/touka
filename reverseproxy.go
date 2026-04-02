@@ -1024,7 +1024,6 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 	}()
 	defer close(backConnClosed)
 	defer conn.Close()
-	defer backConn.Close()
 
 	errc := make(chan error, 2)
 	copyer := switchProtocolCopier{user: conn, backend: backConn}
@@ -1374,11 +1373,11 @@ func reverseProxyUsesForwardedHeader(policy ForwardedHeadersPolicy) bool {
 }
 
 func reverseProxyPrepareExtendedConnectBridge(req *http.Request) (context.Context, bool, error) {
+	if req == nil {
+		return context.Background(), false, nil
+	}
 	protocol := reverseProxyExtendedConnectProtocol(req)
-	if req == nil || req.Method != http.MethodConnect || protocol == "" || !strings.EqualFold(protocol, "websocket") {
-		if req == nil {
-			return context.Background(), false, nil
-		}
+	if req.Method != http.MethodConnect || protocol == "" || !strings.EqualFold(protocol, "websocket") {
 		return req.Context(), false, nil
 	}
 
