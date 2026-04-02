@@ -5,7 +5,6 @@
 package touka
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -1011,7 +1010,6 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 	}
 
 	conn := reverseProxyH2ReadWriteCloser{ReadCloser: bridge.body, ResponseWriter: c.Writer}
-	brw := bufio.NewReadWriter(bufio.NewReaderSize(conn, 1), bufio.NewWriterSize(conn, 1))
 
 	backConnClosed := make(chan struct{})
 	go func() {
@@ -1024,10 +1022,6 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 	defer close(backConnClosed)
 	defer conn.Close()
 	defer backConn.Close()
-
-	if err := brw.Flush(); err != nil {
-		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
-	}
 
 	errc := make(chan error, 2)
 	copyer := switchProtocolCopier{user: conn, backend: backConn}
