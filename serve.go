@@ -46,26 +46,30 @@ func getShutdownTimeout(timeouts []time.Duration) time.Duration {
 	return defaultShutdownTimeout
 }
 
+// serveServer 根据显式指定的启动模式运行 HTTP 或 HTTPS 服务器.
+func serveServer(srv *http.Server, serveTLS bool) error {
+	if serveTLS {
+		// 对于 HTTPS 服务器,如果 srv.TLSConfig.Certificates 已配置,
+		// ListenAndServeTLS 的前两个参数可以为空字符串
+		return srv.ListenAndServeTLS("", "")
+	}
+
+	return srv.ListenAndServe()
+}
+
 // runServer 是一个内部辅助函数,负责在一个新的 goroutine 中启动一个 http.Server,
 // 并处理其启动失败的致命错误
 // serverType 用于在日志中标识服务器类型 (例如 "HTTP", "HTTPS")
-func runServer(serverType string, srv *http.Server) {
+func runServer(serverType string, srv *http.Server, serveTLS bool) {
 	go func() {
-		var err error
 		protocol := "http"
-		if srv.TLSConfig != nil {
+		if serveTLS {
 			protocol = "https"
 		}
 
 		log.Printf("Touka %s server listening on %s://%s", serverType, protocol, srv.Addr)
 
-		if srv.TLSConfig != nil {
-			// 对于 HTTPS 服务器,如果 srv.TLSConfig.Certificates 已配置,
-			// ListenAndServeTLS 的前两个参数可以为空字符串
-			err = srv.ListenAndServeTLS("", "")
-		} else {
-			err = srv.ListenAndServe()
-		}
+		err := serveServer(srv, serveTLS)
 
 		// 如果服务器停止不是因为被优雅关闭 (http.ErrServerClosed),
 		// 则认为是一个严重错误,并终止程序
@@ -236,7 +240,7 @@ func (engine *Engine) RunShutdown(addr string, timeouts ...time.Duration) error 
 		engine.ServerConfigurator(srv)
 	}
 
-	runServer("HTTP", srv)
+	runServer("HTTP", srv, false)
 	return handleGracefulShutdown([]*http.Server{srv}, getShutdownTimeout(timeouts), engine.LogReco)
 }
 
@@ -293,7 +297,7 @@ func (engine *Engine) RunTLS(addr string, tlsConfig *tls.Config, timeouts ...tim
 		engine.ServerConfigurator(srv)
 	}
 
-	runServer("HTTPS", srv)
+	runServer("HTTPS", srv, true)
 	return handleGracefulShutdown([]*http.Server{srv}, getShutdownTimeout(timeouts), engine.LogReco)
 }
 
@@ -361,8 +365,8 @@ func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Con
 	}
 
 	// --- 启动服务器和优雅关闭 ---
-	runServer("HTTPS", httpsSrv)
-	runServer("HTTP Redirect", httpSrv)
+	runServer("HTTPS", httpsSrv, true)
+	runServer("HTTP Redirect", httpSrv, false)
 	return handleGracefulShutdown([]*http.Server{httpsSrv, httpSrv}, getShutdownTimeout(timeouts), engine.LogReco)
 }
 
