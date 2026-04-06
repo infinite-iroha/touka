@@ -49,7 +49,12 @@ func TestServeServerHTTPModeIgnoresTLSConfig(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if err != nil {
-		t.Fatalf("expected HTTP server to accept plain HTTP with TLSConfig set: %v", err)
+		select {
+		case serveErr := <-errCh:
+			t.Fatalf("expected HTTP server to accept plain HTTP with TLSConfig set: request error=%v, serve error=%v", err, serveErr)
+		default:
+			t.Fatalf("expected HTTP server to accept plain HTTP with TLSConfig set: %v", err)
+		}
 	}
 	defer resp.Body.Close()
 
