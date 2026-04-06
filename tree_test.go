@@ -901,6 +901,34 @@ func TestTreeInvalidNodeType(t *testing.T) {
 	}
 }
 
+func TestFindCaseInsensitivePathWithStaticAndParamRoutesDoesNotPanicOnMiss(t *testing.T) {
+	tree := &node{}
+	routes := [...]string{
+		"/:user/:repo/info/refs",
+		"/healthz",
+		"/api/db/data",
+		"/api/db/sum",
+	}
+
+	for _, route := range routes {
+		tree.addRoute(route, fakeHandler(route))
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic while looking up missing path: %v", r)
+		}
+	}()
+
+	if out, found := tree.findCaseInsensitivePath("/does-not-exist", true); found || out != nil {
+		t.Fatalf("expected missing path lookup to return no match, got %q, %t", string(out), found)
+	}
+
+	if out, found := tree.findCaseInsensitivePath("/does-not-exist", false); found || out != nil {
+		t.Fatalf("expected missing path lookup without trailing slash fix to return no match, got %q, %t", string(out), found)
+	}
+}
+
 func TestTreeInvalidParamsType(t *testing.T) {
 	tree := &node{}
 	// add a child with wildcard
