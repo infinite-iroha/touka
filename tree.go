@@ -852,7 +852,7 @@ walk: // 外部循环用于遍历路由树
 			return nil // 未找到, 返回 nil
 		}
 
-		n = n.children[0] // 移动到通配符子节点(通常是唯一一个)
+		n = n.children[len(n.children)-1] // 通配符子节点约定始终位于末尾
 		switch n.nType {
 		case param: // 参数节点
 			// 查找参数结束位置('/' 或路径末尾)
