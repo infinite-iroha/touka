@@ -97,7 +97,105 @@ r.Run(
     touka.WithHTTPRedirect(":80"),
     touka.WithGracefulShutdown(10*time.Second),
 )
+
+// 6. HTTPS + HTTP 重定向（按 header 顺序决定跳转 host）
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(true),
+        touka.WithRedirectHostHeaders([]string{"X-Forwarded-Host", "X-Original-Host"}),
+    ),
+)
+
+// 7. HTTPS + HTTP 重定向（固定跳转到配置的 host）
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(false),
+        touka.WithRedirectHost("example.com"),
+    ),
+)
 ```
+
+### HTTPS Redirect Host 策略
+
+`WithHTTPRedirect(addr, opts...)` 除了开启 HTTP -> HTTPS 重定向外，还支持通过 redirect 子选项控制最终跳转目标的 host。
+
+可用的 redirect 子选项：
+
+- `touka.WithUseHeaderHost(true|false)`
+- `touka.WithRedirectHostHeaders([]string{...})`
+- `touka.WithRedirectHost("example.com")`
+
+#### 模式一：使用请求输入侧的 host
+
+当 `WithUseHeaderHost(true)` 时：
+
+- 如果没有配置 `WithRedirectHostHeaders(...)`，使用 `Request.Host`
+- 如果配置了 `WithRedirectHostHeaders(...)`，按给定顺序读取这些 header，并使用第一个非空值
+- 如果配置了 `WithRedirectHostHeaders(...)` 但所有 header 都为空，返回 `426 Upgrade Required`
+
+示例：
+
+```go
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(true),
+        touka.WithRedirectHostHeaders([]string{"X-Forwarded-Host", "X-Original-Host"}),
+    ),
+)
+```
+
+#### 模式二：使用配置的固定 host
+
+当 `WithUseHeaderHost(false)` 时：
+
+- 不读取 `Request.Host`
+- 不读取 `WithRedirectHostHeaders(...)`
+- 必须配置 `WithRedirectHost("example.com")`
+
+示例：
+
+```go
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(false),
+        touka.WithRedirectHost("example.com"),
+    ),
+)
+```
+
+#### 严格校验规则
+
+以下组合会直接返回配置错误：
+
+- `WithHTTPRedirect(...)` 但没有 `WithTLS(...)`
+- 配置了 `WithRedirectHostHeaders(...)`，但没有显式传入 `WithUseHeaderHost(true)`
+- `WithUseHeaderHost(false)` 但没有配置 `WithRedirectHost(...)`
+- `WithUseHeaderHost(false)` 同时配置了 `WithRedirectHostHeaders(...)`
+- `WithUseHeaderHost(true)` 同时配置了 `WithRedirectHost(...)`
+
+#### 优先级关系
+
+1. 是否启用 `WithHTTPRedirect(...)` 决定是否进入 HTTPS + redirect 模式
+2. `WithUseHeaderHost(...)` 决定 host 来源模式
+3. 当 `WithUseHeaderHost(true)` 时：
+   - 配置了 `WithRedirectHostHeaders(...)` 就按 header 顺序查询
+   - 未配置时使用 `Request.Host`
+4. 当 `WithUseHeaderHost(false)` 时：
+   - 只使用 `WithRedirectHost(...)`
+
+**注意：** `WithRedirectHostHeaders(...)` 读取的是普通请求头值。只有在您明确知道请求经过受信任代理并会正确填充这些 header 时，才建议启用它。
 
 ## 优雅停机 (Graceful Shutdown)
 

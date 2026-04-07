@@ -626,7 +626,7 @@ func (engine *Engine) combineHandlers(h1 HandlersChain, h2 HandlersChain) Handle
 
 // Use 将全局中间件添加到 Engine
 // 这些中间件将应用于所有注册的路由
-func (engine *Engine) Use(middleware ...HandlerFunc) IRouter {
+func (engine *Engine) Use(middleware ...HandlerFunc) Router {
 	engine.globalHandlers = append(engine.globalHandlers, middleware...)
 	engine.rebuildFallbackChains()
 	return engine
@@ -695,7 +695,7 @@ func (engine *Engine) GetRouterInfo() []RouteInfo {
 
 // Group 创建一个新的路由组
 // 路由组允许将具有相同前缀路径和/或共享中间件的路由组织在一起
-func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) IRouter {
+func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) Router {
 	return &RouterGroup{
 		Handlers: engine.combineHandlers(engine.globalHandlers, handlers), // 继承全局中间件
 		basePath: resolveRoutePath("/", relativePath),
@@ -704,7 +704,7 @@ func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) IRoute
 }
 
 // RouterGroup 表示一个路由分组,可以添加组特定的中间件和路由
-// 它也实现了 IRouter 接口,允许嵌套分组
+// 它也实现了 Router 接口,允许嵌套分组
 type RouterGroup struct {
 	Handlers HandlersChain // 组中间件,仅应用于当前组及其子组的路由
 	basePath string        // 组路径前缀
@@ -713,7 +713,7 @@ type RouterGroup struct {
 
 // Use 将中间件应用于当前路由组
 // 这些中间件将应用于当前组及其子组的所有路由
-func (group *RouterGroup) Use(middleware ...HandlerFunc) IRouter {
+func (group *RouterGroup) Use(middleware ...HandlerFunc) Router {
 	group.Handlers = append(group.Handlers, middleware...)
 	return group
 }
@@ -759,7 +759,7 @@ func (group *RouterGroup) ANY(relativePath string, handlers ...HandlerFunc) {
 }
 
 // Group 为当前组创建一个新的子组
-func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) IRouter {
+func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) Router {
 	return &RouterGroup{
 		Handlers: group.engine.combineHandlers(group.Handlers, handlers),
 		basePath: resolveRoutePath(group.basePath, relativePath),
