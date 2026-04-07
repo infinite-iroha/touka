@@ -142,7 +142,7 @@ func main() {
     r := touka.Default()
     fsroot, _ := fs.Sub(content, "dist")
     r.StaticFS("/", http.FS(fsroot))
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 ```
 

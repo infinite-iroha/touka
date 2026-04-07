@@ -46,7 +46,7 @@ func main() {
 
     // 4. 启动服务器并监听 8080 端口
     log.Println("Touka server is running on :8080")
-    if err := r.Run(":8080"); err != nil {
+    if err := r.Run(touka.WithAddr(":8080")); err != nil {
         log.Fatalf("Server failed: %v", err)
     }
 }
@@ -66,11 +66,11 @@ go run main.go
 
 ## 优雅停机
 
-在生产环境中，我们推荐使用 `RunShutdown` 方法来启动服务器，它会监听系统信号并在关闭前等待正在处理的请求完成。
+在生产环境中，我们推荐为 `Run` 追加优雅关闭选项。启用后，Touka 会监听 `SIGINT`/`SIGTERM`，在关闭时取消活动请求的上下文，并在超时前等待正在处理的请求完成。如需由应用内部事件触发关闭，还可以额外配合 `touka.WithShutdownContext(ctx)`。
 
 ```go
 // 等待 10 秒以处理剩余请求
-if err := r.RunShutdown(":8080", 10*time.Second); err != nil {
+if err := r.Run(touka.WithAddr(":8080"), touka.WithGracefulShutdown(10*time.Second)); err != nil {
     log.Fatalf("Server forced to shutdown: %v", err)
 }
 ```

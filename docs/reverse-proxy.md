@@ -28,7 +28,7 @@ func main() {
         Target: target,
     }))
 
-    _ = r.Run(":8080")
+    _ = r.Run(touka.WithAddr(":8080"))
 }
 ```
 
@@ -497,7 +497,7 @@ func main() {
         },
     }))
 
-    if err := r.RunShutdown(":8080", 10*time.Second); err != nil {
+    if err := r.Run(touka.WithAddr(":8080"), touka.WithGracefulShutdown(10*time.Second)); err != nil {
         log.Fatal(err)
     }
 }

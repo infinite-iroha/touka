@@ -404,16 +404,28 @@ func (engine *Engine) setProtocols(config *ProtocolsConfig) {
 	}()
 }
 
-// applyDefaultServerConfig 应用框架的默认配置到 http.Server
-func (engine *Engine) applyDefaultServerConfig(srv *http.Server) {
-	if engine.serverProtocols != nil {
-		srv.Protocols = engine.serverProtocols
-		if engine.serverProtocols.HTTP2() || engine.serverProtocols.UnencryptedHTTP2() {
+func cloneServerProtocols(protocols *http.Protocols) *http.Protocols {
+	if protocols == nil {
+		return nil
+	}
+	cloned := *protocols
+	return &cloned
+}
+
+func applyServerProtocols(srv *http.Server, protocols *http.Protocols) {
+	if protocols != nil {
+		srv.Protocols = cloneServerProtocols(protocols)
+		if srv.Protocols.HTTP2() || srv.Protocols.UnencryptedHTTP2() {
 			if err := configureHTTP2ExtendedConnectServer(srv); err != nil {
 				panic(err)
 			}
 		}
 	}
+}
+
+// applyDefaultServerConfig 应用框架的默认配置到 http.Server
+func (engine *Engine) applyDefaultServerConfig(srv *http.Server) {
+	applyServerProtocols(srv, engine.serverProtocols)
 }
 
 // 配置全局Req Body大小限制

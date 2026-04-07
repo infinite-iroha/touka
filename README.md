@@ -59,9 +59,9 @@ func main() {
 		c.String(http.StatusOK, "Hello, %s! You seem %s.", name, query)
 	})
 
-	// 启动服务器 (支持优雅关闭)
+	// 启动服务器（通过 WithGracefulShutdown 启用优雅关闭）
 	log.Println("Touka Server starting on :8080...")
-	if err := r.RunShutdown(":8080", 10*time.Second); err != nil {
+	if err := r.Run(touka.WithAddr(":8080"), touka.WithGracefulShutdown(10*time.Second)); err != nil {
 		log.Fatalf("Touka server failed to start: %v", err)
 	}
 }
