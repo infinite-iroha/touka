@@ -332,6 +332,9 @@ func buildRedirectServer(engine *Engine, cfg runConfig) (*http.Server, error) {
 
 		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
 			host = parsedHost
+			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+				host = "[" + host + "]"
+			}
 		}
 
 		targetURL := "https://" + host

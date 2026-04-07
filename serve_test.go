@@ -399,6 +399,26 @@ func TestBuildRedirectServerUsesConfiguredRedirectHostWhenHeaderModeDisabled(t *
 	}
 }
 
+func TestBuildRedirectServerPreservesIPv6BracketsInRedirectURL(t *testing.T) {
+	engine := New()
+	server, err := buildRedirectServer(engine, runConfig{addr: ":443", httpRedirectAddr: ":80"})
+	if err != nil {
+		t.Fatalf("build redirect server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://[::1]/plain/path?q=1", nil)
+	req.Host = "[::1]:80"
+	rr := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected redirect status %d, got %d", http.StatusMovedPermanently, rr.Code)
+	}
+	if location := rr.Header().Get("Location"); location != "https://[::1]/plain/path?q=1" {
+		t.Fatalf("unexpected IPv6 redirect location: %q", location)
+	}
+}
+
 func TestGracefulServeShutsDownSiblingServersOnStartupFailure(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
