@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"net/http"
 
@@ -82,6 +83,11 @@ type Engine struct {
 
 	// GlobalMaxRequestBodySize 全局请求体Body大小限制
 	GlobalMaxRequestBodySize int64
+
+	notFoundChain            HandlersChain
+	notFoundNoMethodChain    HandlersChain
+	unmatchedFSChain         HandlersChain
+	unmatchedFSNoMethodChain HandlersChain
 }
 
 // HandleFunc 注册一个或多个 HTTP 方法的路由
@@ -127,10 +133,19 @@ var methodNotAllowedHandler HandlerFunc = func(c *Context) {
 	// 是否是OPTIONS方式
 	if httpMethod == http.MethodOptions {
 		// 如果是 OPTIONS 请求,尝试查找所有允许的方法
-		allowedMethods := engine.allowedMethodsForPath(requestPath)
+		allowedMethods := engine.allowedMethodsForPath(requestPath, c.allowedMethodsBuf[:0])
+		c.allowedMethodsBuf = allowedMethods[:0]
 		if len(allowedMethods) > 0 {
 			// 如果找到了允许的方法,返回 200 OK 并设置 Allow 头部
-			c.Writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
+			allowHeader := c.allowHeaderBuf[:0]
+			for i, method := range allowedMethods {
+				if i > 0 {
+					allowHeader = append(allowHeader, ',', ' ')
+				}
+				allowHeader = append(allowHeader, method...)
+			}
+			c.allowHeaderBuf = allowHeader[:0]
+			c.Writer.Header().Set("Allow", BytesToString(allowHeader))
 			c.Status(http.StatusOK)
 			return
 		}
@@ -251,6 +266,7 @@ func New() *Engine {
 		TLSServerConfigurator:    nil,
 		GlobalMaxRequestBodySize: -1,
 	}
+	engine.rebuildFallbackChains()
 	engine.shutdownCtx, engine.shutdownCancel = context.WithCancel(context.Background())
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
@@ -306,6 +322,7 @@ func (engine *Engine) SetRedirectFixedPath(enable bool) {
 // 是否开启MethodNotAllowed
 func (engine *Engine) SetHandleMethodNotAllowed(enable bool) {
 	engine.HandleMethodNotAllowed = enable
+	engine.rebuildFallbackChains()
 }
 
 // SetLogger传入实例
@@ -346,6 +363,7 @@ func (engine *Engine) SetUnMatchFSChain(fs http.FileSystem, handlers ...HandlerF
 		engine.unMatchFS.ServeUnmatchedAsFS = false
 		engine.UnMatchFSRoutes = nil
 	}
+	engine.rebuildFallbackChains()
 }
 
 // 获取默认Protocol配置
@@ -531,12 +549,52 @@ func NotFound() HandlerFunc {
 func (Engine *Engine) NoRoute(handler HandlerFunc) {
 	Engine.noRoute = handler
 	Engine.noRoutes = nil
+	Engine.rebuildFallbackChains()
 }
 
 // 传入并设置NoRoutes (这不是最后一个处理, 你仍可以next到默认的404处理)
 func (Engine *Engine) NoRoutes(handlerFuncs ...HandlerFunc) {
 	Engine.noRoute = nil
 	Engine.noRoutes = handlerFuncs
+	Engine.rebuildFallbackChains()
+}
+
+func (engine *Engine) rebuildFallbackChains() {
+	buildChain := func(includeMethodNotAllowed bool, includeUnmatchedFS bool) HandlersChain {
+		finalSize := len(engine.globalHandlers) + 1 // 最后的 NotFound
+		if includeMethodNotAllowed {
+			finalSize++
+		}
+		if includeUnmatchedFS {
+			finalSize += len(engine.UnMatchFSRoutes)
+		}
+		if engine.noRoute != nil {
+			finalSize++
+		} else {
+			finalSize += len(engine.noRoutes)
+		}
+
+		chain := make(HandlersChain, 0, finalSize)
+		chain = append(chain, engine.globalHandlers...)
+		if includeMethodNotAllowed {
+			chain = append(chain, methodNotAllowedHandler)
+		}
+		if includeUnmatchedFS {
+			chain = append(chain, engine.UnMatchFSRoutes...)
+		}
+		if engine.noRoute != nil {
+			chain = append(chain, engine.noRoute)
+		} else if len(engine.noRoutes) > 0 {
+			chain = append(chain, engine.noRoutes...)
+		}
+		chain = append(chain, notFoundHandler)
+		return chain
+	}
+
+	engine.notFoundChain = buildChain(engine.HandleMethodNotAllowed, false)
+	engine.notFoundNoMethodChain = buildChain(false, false)
+	engine.unmatchedFSChain = buildChain(engine.HandleMethodNotAllowed, engine.unMatchFS.ServeUnmatchedAsFS)
+	engine.unmatchedFSNoMethodChain = buildChain(false, engine.unMatchFS.ServeUnmatchedAsFS)
 }
 
 // combineHandlers 组合多个处理函数链为一个
@@ -553,6 +611,7 @@ func (engine *Engine) combineHandlers(h1 HandlersChain, h2 HandlersChain) Handle
 // 这些中间件将应用于所有注册的路由
 func (engine *Engine) Use(middleware ...HandlerFunc) IRouter {
 	engine.globalHandlers = append(engine.globalHandlers, middleware...)
+	engine.rebuildFallbackChains()
 	return engine
 }
 
@@ -746,48 +805,24 @@ func (engine *Engine) handleRequest(c *Context) {
 				c.Redirect(http.StatusMovedPermanently, redirectPath) // 301 永久重定向
 				return
 			}
-			if engine.RedirectFixedPath {
+			if engine.RedirectFixedPath && shouldTryFixedPathLookup(requestPath, rootNode) {
 				// 仅在启用固定路径重定向时执行大小写修复查找, 避免无意义的二次树遍历.
-				ciPath, found := rootNode.findCaseInsensitivePath(requestPath, engine.RedirectTrailingSlash)
+				ciPath, found := rootNode.findCaseInsensitivePathWithBuffer(requestPath, c.fixedPathBuf, engine.RedirectTrailingSlash)
 				if found {
+					c.fixedPathBuf = ciPath[:0]
 					c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
 					return
 				}
+				c.fixedPathBuf = ciPath[:0]
 			}
 		}
 	}
 
-	// 构建处理链
-	// 组合全局中间件和路由处理函数
-	handlers := engine.globalHandlers
-
-	// 如果启用了 MethodNotAllowed 处理,并且没有找到精确匹配的路由
-	// 则在全局中间件之后添加 MethodNotAllowed 处理器
-	if engine.HandleMethodNotAllowed {
-		handlers = append(handlers, MethodNotAllowed())
-	}
-
-	// 如果启用了 UnMatchFS 处理,并且没有找到精确匹配的路由和 MethodNotAllowed
-	// 则在处理链的最后添加 UnMatchFS 处理器
 	if engine.unMatchFS.ServeUnmatchedAsFS {
-		/*
-			var unMatchFSHandle = c.engine.unMatchFileServer
-			handlers = append(handlers, unMatchFSHandle)
-		*/
-		handlers = append(handlers, engine.UnMatchFSRoutes...)
+		c.handlers = engine.unmatchedFSChain
+	} else {
+		c.handlers = engine.notFoundChain
 	}
-
-	// 如果用户设置了 NoRoute 处理器,且没有匹配到任何路由、MethodNotAllowed 或 UnMatchFS
-	// 则在处理链的最后添加 NoRoute 处理器
-	if engine.noRoute != nil {
-		handlers = append(handlers, engine.noRoute)
-	} else if len(engine.noRoutes) > 0 {
-		handlers = append(handlers, engine.noRoutes...)
-	}
-
-	handlers = append(handlers, NotFound())
-
-	c.handlers = handlers
 	c.Next() // 执行处理函数链
 	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
 }
@@ -813,8 +848,28 @@ func isGeneralOptionsRequest(req *http.Request) bool {
 	return req != nil && req.Method == http.MethodOptions && req.RequestURI == "*"
 }
 
-func (engine *Engine) allowedMethodsForPath(requestPath string) []string {
-	allowedMethods := make([]string, 0, len(engine.methodTrees))
+func shouldTryFixedPathLookup(path string, root *node) bool {
+	if root != nil && root.hasCaseInsensitivePath {
+		return true
+	}
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c >= utf8.RuneSelf {
+			return true
+		}
+		if c >= 'A' && c <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func (engine *Engine) allowedMethodsForPath(requestPath string, allowedMethods []string) []string {
+	if cap(allowedMethods) < len(engine.methodTrees) {
+		allowedMethods = make([]string, 0, len(engine.methodTrees))
+	} else {
+		allowedMethods = allowedMethods[:0]
+	}
 	for _, treeIter := range engine.methodTrees {
 		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
 		tempSkippedNodes := GetTempSkippedNodes()

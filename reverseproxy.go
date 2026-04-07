@@ -699,8 +699,17 @@ func (p *reverseProxyHandler) writeLocalOptionsResponse(c *Context) {
 
 	if c.engine != nil {
 		if c.Request != nil && c.Request.RequestURI != "*" {
-			if allow := c.engine.allowedMethodsForPath(routeLookupPath(c.Request)); len(allow) > 0 {
-				c.Writer.Header().Set("Allow", strings.Join(allow, ", "))
+			if allow := c.engine.allowedMethodsForPath(routeLookupPath(c.Request), c.allowedMethodsBuf[:0]); len(allow) > 0 {
+				c.allowedMethodsBuf = allow[:0]
+				allowHeader := c.allowHeaderBuf[:0]
+				for i, method := range allow {
+					if i > 0 {
+						allowHeader = append(allowHeader, ',', ' ')
+					}
+					allowHeader = append(allowHeader, method...)
+				}
+				c.allowHeaderBuf = allowHeader[:0]
+				c.Writer.Header().Set("Allow", BytesToString(allowHeader))
 			}
 		}
 	}

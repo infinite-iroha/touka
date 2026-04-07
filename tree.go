@@ -121,14 +121,28 @@ const (
 
 // node 表示路由树中的一个节点.
 type node struct {
-	path      string        // 当前节点的路径段
-	indices   string        // 子节点第一个字符的索引字符串, 用于快速查找子节点
-	wildChild bool          // 是否包含通配符子节点(:param 或 *catchAll)
-	nType     nodeType      // 节点的类型(静态, 根, 参数, 捕获所有)
-	priority  uint32        // 节点的优先级, 用于查找时优先匹配
-	children  []*node       // 子节点切片, 最多有一个 :param 风格的节点位于数组末尾
-	handlers  HandlersChain // 绑定到此节点的处理函数链
-	fullPath  string        // 完整路径, 用于调试和错误信息
+	path                   string        // 当前节点的路径段
+	indices                string        // 子节点第一个字符的索引字符串, 用于快速查找子节点
+	wildChild              bool          // 是否包含通配符子节点(:param 或 *catchAll)
+	hasCaseInsensitivePath bool          // 根节点是否包含需要 fixed-path 大小写修正的路由
+	nType                  nodeType      // 节点的类型(静态, 根, 参数, 捕获所有)
+	priority               uint32        // 节点的优先级, 用于查找时优先匹配
+	children               []*node       // 子节点切片, 最多有一个 :param 风格的节点位于数组末尾
+	handlers               HandlersChain // 绑定到此节点的处理函数链
+	fullPath               string        // 完整路径, 用于调试和错误信息
+}
+
+func routeNeedsCaseInsensitiveLookup(path string) bool {
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c >= utf8.RuneSelf {
+			return true
+		}
+		if c >= 'A' && c <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 // incrementChildPrio 增加给定子节点的优先级并在必要时重新排序.
@@ -162,6 +176,9 @@ func (n *node) incrementChildPrio(pos int) int {
 func (n *node) addRoute(path string, handlers HandlersChain) {
 	fullPath := path // 记录完整的路径
 	n.priority++     // 增加当前节点的优先级
+	if routeNeedsCaseInsensitiveLookup(path) {
+		n.hasCaseInsensitivePath = true
+	}
 
 	// 如果是空树(根节点)
 	if len(n.path) == 0 && len(n.children) == 0 {
@@ -702,13 +719,24 @@ walk: // 外部循环用于遍历路由树
 // 它还可以选择修复尾部斜杠.
 // 它返回大小写校正后的路径和一个布尔值, 指示查找是否成功.
 func (n *node) findCaseInsensitivePath(path string, fixTrailingSlash bool) ([]byte, bool) {
+	return n.findCaseInsensitivePathWithBuffer(path, nil, fixTrailingSlash)
+}
+
+func (n *node) findCaseInsensitivePathWithBuffer(path string, buf []byte, fixTrailingSlash bool) ([]byte, bool) {
 	const stackBufSize = 128 // 栈上缓冲区的默认大小
 
 	// 在常见情况下使用栈上静态大小的缓冲区.
 	// 如果路径太长, 则在堆上分配缓冲区.
-	buf := make([]byte, 0, stackBufSize)
-	if length := len(path) + 1; length > stackBufSize {
-		buf = make([]byte, 0, length) // 如果路径太长, 则分配更大的缓冲区
+	if buf != nil {
+		buf = buf[:0]
+	}
+	if cap(buf) < len(path)+1 {
+		var stackBuf [stackBufSize]byte
+		if len(path)+1 <= stackBufSize {
+			buf = stackBuf[:0]
+		} else {
+			buf = make([]byte, 0, len(path)+1) // 如果路径太长, 则分配更大的缓冲区
+		}
 	}
 
 	ciPath := n.findCaseInsensitivePathRec(
