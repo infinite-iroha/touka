@@ -518,13 +518,16 @@ func (engine *Engine) Run(opts ...RunOption) error {
 			}
 
 			err := <-serverStopped
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				if shutdownErr := shutdownServers(servers, defaultShutdownTimeout); shutdownErr != nil {
+			if shutdownErr := shutdownServers(servers, defaultShutdownTimeout); shutdownErr != nil {
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
 					return errors.Join(err, shutdownErr)
 				}
+				return shutdownErr
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return err
 			}
-			return err
+			return nil
 		}
 
 		protocolLabel := "HTTP"
