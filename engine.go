@@ -739,12 +739,13 @@ func (engine *Engine) handleRequest(c *Context) {
 				c.Redirect(http.StatusMovedPermanently, redirectPath) // 301 永久重定向
 				return
 			}
-			// 尝试不区分大小写的查找
-			// 直接在 rootNode 上调用 findCaseInsensitivePath 方法
-			ciPath, found := rootNode.findCaseInsensitivePath(requestPath, engine.RedirectTrailingSlash)
-			if found && engine.RedirectFixedPath {
-				c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
-				return
+			if engine.RedirectFixedPath {
+				// 仅在启用固定路径重定向时执行大小写修复查找, 避免无意义的二次树遍历.
+				ciPath, found := rootNode.findCaseInsensitivePath(requestPath, engine.RedirectTrailingSlash)
+				if found {
+					c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
+					return
+				}
 			}
 		}
 	}

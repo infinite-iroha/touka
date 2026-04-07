@@ -452,12 +452,14 @@ type skippedNode struct {
 // 建议进行 TSR(尾部斜杠重定向).
 func (n *node) getValue(path string, params *Params, skippedNodes *[]skippedNode, unescape bool) (value nodeValue) {
 	var globalParamsCount int16 // 全局参数计数
+	var backtrackToWildChild bool
 
 walk: // 外部循环用于遍历路由树
 	for {
 		prefix := n.path // 当前节点的路径前缀
 		if len(path) > len(prefix) {
 			if path[:len(prefix)] == prefix { // 如果路径以当前节点的前缀开头
+				pathAtNode := path
 				path = path[len(prefix):] // 移除已匹配的前缀
 
 				// 在访问 path[0] 之前进行安全检查
@@ -467,30 +469,26 @@ walk: // 外部循环用于遍历路由树
 
 				// 优先尝试所有非通配符子节点, 通过匹配索引字符
 				idxc := path[0] // 剩余路径的第一个字符
-				for i, c := range []byte(n.indices) {
-					if c == idxc { // 如果找到匹配的索引字符
-						// 如果当前节点有通配符子节点, 则将当前节点添加到 skippedNodes, 以便回溯
-						if n.wildChild {
-							index := len(*skippedNodes)
-							*skippedNodes = (*skippedNodes)[:index+1]
-							(*skippedNodes)[index] = skippedNode{
-								path: prefix + path, // 记录跳过的路径
-								node: &node{ // 复制当前节点的状态
-									path:      n.path,
-									wildChild: n.wildChild,
-									nType:     n.nType,
-									priority:  n.priority,
-									children:  n.children,
-									handlers:  n.handlers,
-									fullPath:  n.fullPath,
-								},
-								paramsCount: globalParamsCount, // 记录当前参数计数
+				if !backtrackToWildChild {
+					for i := 0; i < len(n.indices); i++ {
+						if n.indices[i] == idxc { // 如果找到匹配的索引字符
+							// 如果当前节点有通配符子节点, 则将当前节点添加到 skippedNodes, 以便回溯
+							if n.wildChild {
+								index := len(*skippedNodes)
+								*skippedNodes = (*skippedNodes)[:index+1]
+								(*skippedNodes)[index] = skippedNode{
+									path:        pathAtNode, // 记录进入当前节点时的剩余路径
+									node:        n,
+									paramsCount: globalParamsCount, // 记录当前参数计数
+								}
 							}
-						}
 
-						n = n.children[i] // 移动到匹配的子节点
-						continue walk     // 继续外部循环
+							n = n.children[i] // 移动到匹配的子节点
+							continue walk     // 继续外部循环
+						}
 					}
+				} else {
+					backtrackToWildChild = false
 				}
 
 				if !n.wildChild {
@@ -507,7 +505,8 @@ walk: // 外部循环用于遍历路由树
 									*value.params = (*value.params)[:skippedNode.paramsCount] // 恢复参数切片
 								}
 								globalParamsCount = skippedNode.paramsCount // 恢复参数计数
-								continue walk                               // 继续外部循环
+								backtrackToWildChild = true
+								continue walk // 继续外部循环
 							}
 						}
 					}
@@ -547,7 +546,7 @@ walk: // 外部循环用于遍历路由树
 						i := len(*value.params)
 						*value.params = (*value.params)[:i+1] // 扩展切片
 						val := path[:end]                     // 提取参数值
-						if unescape {                         // 如果需要进行 URL 解码
+						if unescape && (strings.IndexByte(val, '%') >= 0 || strings.IndexByte(val, '+') >= 0) {
 							if v, err := url.QueryUnescape(val); err == nil {
 								val = v // 解码成功则更新值
 							}
@@ -599,7 +598,7 @@ walk: // 外部循环用于遍历路由树
 						i := len(*value.params)
 						*value.params = (*value.params)[:i+1] // 扩展切片
 						val := path                           // 参数值是剩余的整个路径
-						if unescape {                         // 如果需要进行 URL 解码
+						if unescape && (strings.IndexByte(val, '%') >= 0 || strings.IndexByte(val, '+') >= 0) {
 							if v, err := url.QueryUnescape(path); err == nil {
 								val = v // 解码成功则更新值
 							}
@@ -634,6 +633,7 @@ walk: // 外部循环用于遍历路由树
 							*value.params = (*value.params)[:skippedNode.paramsCount]
 						}
 						globalParamsCount = skippedNode.paramsCount
+						backtrackToWildChild = true
 						continue walk
 					}
 				}
@@ -658,8 +658,8 @@ walk: // 外部循环用于遍历路由树
 			}
 
 			// 未找到处理函数. 检查此路径加尾部斜杠是否存在处理函数, 以进行尾部斜杠重定向建议
-			for i, c := range []byte(n.indices) {
-				if c == '/' { // 如果索引中包含 '/'
+			for i := 0; i < len(n.indices); i++ {
+				if n.indices[i] == '/' { // 如果索引中包含 '/'
 					n = n.children[i]                                      // 移动到对应的子节点
 					value.tsr = (len(n.path) == 1 && n.handlers != nil) || // 如果子节点路径是 '/' 且有处理函数
 						(n.nType == catchAll && n.children[0].handlers != nil) // 或者子节点是 catchAll 且其子节点有处理函数
@@ -688,6 +688,7 @@ walk: // 外部循环用于遍历路由树
 						*value.params = (*value.params)[:skippedNode.paramsCount]
 					}
 					globalParamsCount = skippedNode.paramsCount
+					backtrackToWildChild = true
 					continue walk
 				}
 			}
@@ -758,8 +759,8 @@ walk: // 外部循环用于遍历路由树
 			// 未找到处理函数.
 			// 尝试通过添加尾部斜杠来修复路径
 			if fixTrailingSlash {
-				for i, c := range []byte(n.indices) {
-					if c == '/' { // 如果索引中包含 '/'
+				for i := 0; i < len(n.indices); i++ {
+					if n.indices[i] == '/' { // 如果索引中包含 '/'
 						n = n.children[i]                             // 移动到对应的子节点
 						if (len(n.path) == 1 && n.handlers != nil) || // 如果子节点路径是 '/' 且有处理函数
 							(n.nType == catchAll && n.children[0].handlers != nil) { // 或者子节点是 catchAll 且其子节点有处理函数
@@ -781,8 +782,8 @@ walk: // 外部循环用于遍历路由树
 			if rb[0] != 0 {
 				// 旧 rune 未处理完
 				idxc := rb[0]
-				for i, c := range []byte(n.indices) {
-					if c == idxc {
+				for i := 0; i < len(n.indices); i++ {
+					if n.indices[i] == idxc {
 						// 继续处理子节点
 						n = n.children[i]
 						npLen = len(n.path)
@@ -813,9 +814,9 @@ walk: // 外部循环用于遍历路由树
 				rb = shiftNRuneBytes(rb, off)
 
 				idxc := rb[0]
-				for i, c := range []byte(n.indices) {
+				for i := 0; i < len(n.indices); i++ {
 					// 小写匹配
-					if c == idxc {
+					if n.indices[i] == idxc {
 						// 必须使用递归方法, 因为大写字节和小写字节都可能作为索引存在
 						if out := n.children[i].findCaseInsensitivePathRec(
 							path, ciPath, rb, fixTrailingSlash,
@@ -832,9 +833,9 @@ walk: // 外部循环用于遍历路由树
 					rb = shiftNRuneBytes(rb, off)
 
 					idxc := rb[0]
-					for i, c := range []byte(n.indices) {
+					for i := 0; i < len(n.indices); i++ {
 						// 大写匹配
-						if c == idxc {
+						if n.indices[i] == idxc {
 							// 继续处理子节点
 							n = n.children[i]
 							npLen = len(n.path)
