@@ -90,6 +90,18 @@ func TestRunRejectsRedirectWithoutTLS(t *testing.T) {
 	}
 }
 
+func TestRunRejectsRedirectHostHeadersWithoutExplicitUseHeaderHostTrue(t *testing.T) {
+	engine := New()
+	err := engine.Run(
+		WithAddr(":443"),
+		WithTLS(&tls.Config{}),
+		WithHTTPRedirect(":80", WithRedirectHostHeaders([]string{"X-Forwarded-Host"})),
+	)
+	if err == nil {
+		t.Fatal("expected redirect host headers without explicit WithUseHeaderHost(true) to fail")
+	}
+}
+
 func TestWithGracefulShutdownDefaultUsesDefaultTimeout(t *testing.T) {
 	cfg := defaultRunConfig()
 	if err := WithGracefulShutdownDefault().apply(&cfg); err != nil {
@@ -122,7 +134,7 @@ func TestWithTLSDoesNotRequireGracefulShutdown(t *testing.T) {
 
 func TestBuildRedirectServerRejectsHTTPSAddrWithoutPort(t *testing.T) {
 	engine := New()
-	if _, err := buildRedirectServer(engine, "example.com", ":80"); err == nil {
+	if _, err := buildRedirectServer(engine, runConfig{addr: "example.com", httpRedirectAddr: ":80"}); err == nil {
 		t.Fatal("expected redirect server builder to reject https address without port")
 	}
 }
@@ -136,6 +148,40 @@ func TestValidateRunConfigRejectsShutdownContextWithoutGraceful(t *testing.T) {
 	}
 	if err := validateRunConfig(cfg); err == nil {
 		t.Fatal("expected shutdown context without graceful shutdown to fail validation")
+	}
+}
+
+func TestValidateRunConfigDoesNotMutateMode(t *testing.T) {
+	cfg := defaultRunConfig()
+	cfg.httpRedirectAddr = ":80"
+	if err := validateRunConfig(cfg); err != nil {
+		t.Fatalf("validate run config: %v", err)
+	}
+	if cfg.mode != runModeHTTP {
+		t.Fatalf("expected validateRunConfig to leave mode unchanged, got %v", cfg.mode)
+	}
+}
+
+func TestValidateRunConfigRejectsConfiguredHostModeWithoutRedirectHost(t *testing.T) {
+	cfg := defaultRunConfig()
+	cfg.mode = runModeHTTPSRedirect
+	cfg.tlsConfig = &tls.Config{}
+	cfg.useHeaderHost = false
+	cfg.useHeaderHostSet = true
+	if err := validateRunConfig(cfg); err == nil {
+		t.Fatal("expected configured host mode without redirect host to fail validation")
+	}
+}
+
+func TestValidateRunConfigRejectsRedirectHostWhenHeaderModeEnabled(t *testing.T) {
+	cfg := defaultRunConfig()
+	cfg.mode = runModeHTTPSRedirect
+	cfg.tlsConfig = &tls.Config{}
+	cfg.useHeaderHost = true
+	cfg.useHeaderHostSet = true
+	cfg.redirectHost = "configured.example"
+	if err := validateRunConfig(cfg); err == nil {
+		t.Fatal("expected redirect host to be rejected when header host mode is enabled")
 	}
 }
 
@@ -189,7 +235,7 @@ func TestBuildRedirectServerUsesGenericConfigurator(t *testing.T) {
 		s.ReadTimeout = time.Second
 	})
 
-	server, err := buildRedirectServer(engine, ":443", ":80")
+	server, err := buildRedirectServer(engine, runConfig{addr: ":443", httpRedirectAddr: ":80"})
 	if err != nil {
 		t.Fatalf("build redirect server: %v", err)
 	}
@@ -216,7 +262,7 @@ func TestTLSRunDoesNotMutateDefaultHTTPProtocols(t *testing.T) {
 
 func TestBuildRedirectServerRedirectsWithoutGracefulMode(t *testing.T) {
 	engine := New()
-	server, err := buildRedirectServer(engine, ":443", ":80")
+	server, err := buildRedirectServer(engine, runConfig{addr: ":443", httpRedirectAddr: ":80"})
 	if err != nil {
 		t.Fatalf("build redirect server: %v", err)
 	}
@@ -230,6 +276,84 @@ func TestBuildRedirectServerRedirectsWithoutGracefulMode(t *testing.T) {
 		t.Fatalf("expected redirect status %d, got %d", http.StatusMovedPermanently, rr.Code)
 	}
 	if location := rr.Header().Get("Location"); location != "https://example.com/plain/path?q=1" {
+		t.Fatalf("unexpected redirect location: %q", location)
+	}
+}
+
+func TestBuildRedirectServerUsesConfiguredHeadersInOrder(t *testing.T) {
+	engine := New()
+	server, err := buildRedirectServer(engine, runConfig{
+		addr:                ":443",
+		httpRedirectAddr:    ":80",
+		useHeaderHost:       true,
+		useHeaderHostSet:    true,
+		redirectHostHeaders: []string{"X-First-Host", "X-Forwarded-Host"},
+	})
+	if err != nil {
+		t.Fatalf("build redirect server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/plain/path?q=1", nil)
+	req.Host = "example.com:80"
+	req.Header.Set("X-Forwarded-Host", "forwarded.example")
+	req.Header.Set("X-First-Host", "first.example")
+	rr := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected redirect status %d, got %d", http.StatusMovedPermanently, rr.Code)
+	}
+	if location := rr.Header().Get("Location"); location != "https://first.example/plain/path?q=1" {
+		t.Fatalf("unexpected redirect location: %q", location)
+	}
+}
+
+func TestBuildRedirectServerReturns426WhenConfiguredHeadersMiss(t *testing.T) {
+	engine := New()
+	server, err := buildRedirectServer(engine, runConfig{
+		addr:                ":443",
+		httpRedirectAddr:    ":80",
+		useHeaderHost:       true,
+		useHeaderHostSet:    true,
+		redirectHostHeaders: []string{"X-Forwarded-Host"},
+	})
+	if err != nil {
+		t.Fatalf("build redirect server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/plain/path?q=1", nil)
+	req.Host = "example.com:80"
+	rr := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUpgradeRequired {
+		t.Fatalf("expected status %d when configured redirect headers miss, got %d", http.StatusUpgradeRequired, rr.Code)
+	}
+}
+
+func TestBuildRedirectServerUsesConfiguredRedirectHostWhenHeaderModeDisabled(t *testing.T) {
+	engine := New()
+	server, err := buildRedirectServer(engine, runConfig{
+		addr:             ":443",
+		httpRedirectAddr: ":80",
+		useHeaderHost:    false,
+		useHeaderHostSet: true,
+		redirectHost:     "configured.example",
+	})
+	if err != nil {
+		t.Fatalf("build redirect server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/plain/path?q=1", nil)
+	req.Host = "example.com:80"
+	req.Header.Set("X-Forwarded-Host", "forwarded.example")
+	rr := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected redirect status %d, got %d", http.StatusMovedPermanently, rr.Code)
+	}
+	if location := rr.Header().Get("Location"); location != "https://configured.example/plain/path?q=1" {
 		t.Fatalf("unexpected redirect location: %q", location)
 	}
 }
@@ -252,7 +376,7 @@ func TestGracefulServeShutsDownSiblingServersOnStartupFailure(t *testing.T) {
 	}
 
 	engine := New()
-	redirectServer, err := buildRedirectServer(engine, ":443", redirectAddr)
+	redirectServer, err := buildRedirectServer(engine, runConfig{addr: ":443", httpRedirectAddr: redirectAddr})
 	if err != nil {
 		t.Fatalf("build redirect server: %v", err)
 	}
@@ -273,5 +397,36 @@ func TestGracefulServeShutsDownSiblingServersOnStartupFailure(t *testing.T) {
 	}
 	if !strings.Contains(dialErr.Error(), "refused") && !strings.Contains(dialErr.Error(), "reset") {
 		t.Fatalf("unexpected dial result after shutdown, got %v", dialErr)
+	}
+}
+
+func TestRunNonGracefulRedirectReturnsStartupError(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on occupied addr: %v", err)
+	}
+	occupiedAddr := occupied.Addr().String()
+	defer occupied.Close()
+
+	redirectListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for redirect addr: %v", err)
+	}
+	redirectAddr := redirectListener.Addr().String()
+	if err := redirectListener.Close(); err != nil {
+		t.Fatalf("close redirect addr probe: %v", err)
+	}
+
+	engine := New()
+	err = engine.Run(
+		WithAddr(occupiedAddr),
+		WithTLS(&tls.Config{}),
+		WithHTTPRedirect(redirectAddr),
+	)
+	if err == nil {
+		t.Fatal("expected non-graceful TLS redirect startup to return bind error")
+	}
+	if !strings.Contains(err.Error(), occupiedAddr) {
+		t.Fatalf("expected startup error to mention occupied address %q, got %v", occupiedAddr, err)
 	}
 }
