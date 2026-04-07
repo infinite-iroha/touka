@@ -97,7 +97,7 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	}
 	c.handlers = nil
 	c.index = -1                          // 初始为 -1，`Next()` 将其设置为 0
-	c.Keys = make(map[string]any)         // 每次请求重新创建 map，避免数据污染
+	c.Keys = nil                          // 仅在首次 Set 时创建，避免每个请求都分配 map
 	c.Errors = c.Errors[:0]               // 清空 Errors 切片
 	c.queryCache = nil                    // 清空查询参数缓存
 	c.formCache = nil                     // 清空表单数据缓存

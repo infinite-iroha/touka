@@ -117,6 +117,46 @@ type ErrorHandle struct {
 
 type ErrorHandler func(c *Context, code int, err error)
 
+var errMethodNotAllowed = errors.New("method not allowed")
+var errNotFound = errors.New("not found")
+
+var methodNotAllowedHandler HandlerFunc = func(c *Context) {
+	httpMethod := c.Request.Method
+	requestPath := routeLookupPath(c.Request)
+	engine := c.engine
+	// 是否是OPTIONS方式
+	if httpMethod == http.MethodOptions {
+		// 如果是 OPTIONS 请求,尝试查找所有允许的方法
+		allowedMethods := engine.allowedMethodsForPath(requestPath)
+		if len(allowedMethods) > 0 {
+			// 如果找到了允许的方法,返回 200 OK 并设置 Allow 头部
+			c.Writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
+			c.Status(http.StatusOK)
+			return
+		}
+	}
+	// 尝试遍历所有方法树,看是否有其他方法可以匹配当前路径
+	for _, treeIter := range engine.methodTrees {
+		if treeIter.method == httpMethod { // 已经处理过当前方法,跳过
+			continue
+		}
+		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
+		tempSkippedNodes := GetTempSkippedNodes()
+		value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
+		PutTempSkippedNodes(tempSkippedNodes)
+		if value.handlers != nil {
+			// 使用定义的ErrorHandle处理
+			engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errMethodNotAllowed)
+			return
+		}
+	}
+}
+
+var notFoundHandler HandlerFunc = func(c *Context) {
+	engine := c.engine
+	engine.errorHandle.handler(c, http.StatusNotFound, errNotFound)
+}
+
 // defaultErrorHandle 默认错误处理
 func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是否已断开连接
 	select {
@@ -479,45 +519,12 @@ func PutTempSkippedNodes(skippedNodes *[]skippedNode) {
 
 // 405中间件
 func MethodNotAllowed() HandlerFunc {
-	return func(c *Context) {
-		httpMethod := c.Request.Method
-		requestPath := routeLookupPath(c.Request)
-		engine := c.engine
-		// 是否是OPTIONS方式
-		if httpMethod == http.MethodOptions {
-			// 如果是 OPTIONS 请求,尝试查找所有允许的方法
-			allowedMethods := engine.allowedMethodsForPath(requestPath)
-			if len(allowedMethods) > 0 {
-				// 如果找到了允许的方法,返回 200 OK 并设置 Allow 头部
-				c.Writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-				c.Status(http.StatusOK)
-				return
-			}
-		}
-		// 尝试遍历所有方法树,看是否有其他方法可以匹配当前路径
-		for _, treeIter := range engine.methodTrees {
-			if treeIter.method == httpMethod { // 已经处理过当前方法,跳过
-				continue
-			}
-			// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-			tempSkippedNodes := GetTempSkippedNodes()
-			value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
-			PutTempSkippedNodes(tempSkippedNodes)
-			if value.handlers != nil {
-				// 使用定义的ErrorHandle处理
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-				return
-			}
-		}
-	}
+	return methodNotAllowedHandler
 }
 
 // 404最后处理
 func NotFound() HandlerFunc {
-	return func(c *Context) {
-		engine := c.engine
-		engine.errorHandle.handler(c, http.StatusNotFound, errors.New("not found"))
-	}
+	return notFoundHandler
 }
 
 // 传入并设置NoRoute (这不是最后一个处理, 你仍可以next到默认的404处理)
