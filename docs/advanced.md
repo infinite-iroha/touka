@@ -44,7 +44,9 @@ r.SetTLSServerConfigurator(func(server *http.Server) {
 Touka 支持配置 HTTP/1.1、HTTP/2 和 H2C（HTTP/2 Cleartext）：
 
 ```go
-// 使用默认协议配置（仅 HTTP/1.1）
+// 使用默认协议配置
+// 普通 HTTP 启动时默认为 HTTP/1.1；若使用 WithTLS(...) 且未手动覆盖协议集，
+// HTTPS 服务器会默认启用 HTTP/1.1 与 HTTP/2。
 r.SetDefaultProtocols()
 
 // 自定义协议配置
@@ -57,33 +59,147 @@ r.SetProtocols(&touka.ProtocolsConfig{
 
 ### 启动方式
 
-Touka 提供了多种服务器启动方式：
+Touka 统一通过 `Run(opts...)` 启动服务器：
 
 ```go
 // 1. 简单启动（无优雅停机）
-r.Run(":8080")
+r.Run(touka.WithAddr(":8080"))
 
 // 2. 带优雅停机的启动
-r.RunShutdown(":8080", 10*time.Second)
+r.Run(touka.WithAddr(":8080"), touka.WithGracefulShutdown(10*time.Second))
 
 // 3. 带上下文的优雅停机
 ctx, cancel := context.WithCancel(context.Background())
-r.RunShutdownWithContext(":8080", ctx, 10*time.Second)
+defer cancel()
+r.Run(
+    touka.WithAddr(":8080"),
+    touka.WithGracefulShutdown(10*time.Second),
+    touka.WithShutdownContext(ctx),
+)
 
 // 4. HTTPS 启动
 tlsConfig := &tls.Config{
     MinVersion: tls.VersionTLS12,
     // 其他 TLS 配置...
 }
-r.RunTLS(":443", tlsConfig, 10*time.Second)
+// WithTLS(...) 与优雅关闭相互独立；这里演示 HTTPS + 默认优雅关闭超时。
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithGracefulShutdownDefault(),
+)
 
 // 5. HTTPS + HTTP 重定向
-r.RunTLSRedir(":80", ":443", tlsConfig, 10*time.Second)
+// WithHTTPRedirect(...) 需要与 WithTLS(...) 配合使用。
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(":80"),
+    touka.WithGracefulShutdown(10*time.Second),
+)
+
+// 6. HTTPS + HTTP 重定向（按 header 顺序决定跳转 host）
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(true),
+        touka.WithRedirectHostHeaders([]string{"X-Forwarded-Host", "X-Original-Host"}),
+    ),
+)
+
+// 7. HTTPS + HTTP 重定向（固定跳转到配置的 host）
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(false),
+        touka.WithRedirectHost("example.com"),
+    ),
+)
 ```
+
+### HTTPS Redirect Host 策略
+
+`WithHTTPRedirect(addr, opts...)` 除了开启 HTTP -> HTTPS 重定向外，还支持通过 redirect 子选项控制最终跳转目标的 host。
+
+可用的 redirect 子选项：
+
+- `touka.WithUseHeaderHost(true|false)`
+- `touka.WithRedirectHostHeaders([]string{...})`
+- `touka.WithRedirectHost("example.com")`
+
+#### 模式一：使用请求输入侧的 host
+
+当 `WithUseHeaderHost(true)` 时：
+
+- 如果没有配置 `WithRedirectHostHeaders(...)`，使用 `Request.Host`
+- 如果配置了 `WithRedirectHostHeaders(...)`，按给定顺序读取这些 header，并使用第一个非空值
+- 如果配置了 `WithRedirectHostHeaders(...)` 但所有 header 都为空，返回 `426 Upgrade Required`
+
+示例：
+
+```go
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(true),
+        touka.WithRedirectHostHeaders([]string{"X-Forwarded-Host", "X-Original-Host"}),
+    ),
+)
+```
+
+#### 模式二：使用配置的固定 host
+
+当 `WithUseHeaderHost(false)` 时：
+
+- 不读取 `Request.Host`
+- 不读取 `WithRedirectHostHeaders(...)`
+- 必须配置 `WithRedirectHost("example.com")`
+
+示例：
+
+```go
+r.Run(
+    touka.WithAddr(":443"),
+    touka.WithTLS(tlsConfig),
+    touka.WithHTTPRedirect(
+        ":80",
+        touka.WithUseHeaderHost(false),
+        touka.WithRedirectHost("example.com"),
+    ),
+)
+```
+
+#### 严格校验规则
+
+以下组合会直接返回配置错误：
+
+- `WithHTTPRedirect(...)` 但没有 `WithTLS(...)`
+- 配置了 `WithRedirectHostHeaders(...)`，但没有显式传入 `WithUseHeaderHost(true)`
+- `WithUseHeaderHost(false)` 但没有配置 `WithRedirectHost(...)`
+- `WithUseHeaderHost(false)` 同时配置了 `WithRedirectHostHeaders(...)`
+- `WithUseHeaderHost(true)` 同时配置了 `WithRedirectHost(...)`
+
+#### 优先级关系
+
+1. 是否启用 `WithHTTPRedirect(...)` 决定是否进入 HTTPS + redirect 模式
+2. `WithUseHeaderHost(...)` 决定 host 来源模式
+3. 当 `WithUseHeaderHost(true)` 时：
+   - 配置了 `WithRedirectHostHeaders(...)` 就按 header 顺序查询
+   - 未配置时使用 `Request.Host`
+4. 当 `WithUseHeaderHost(false)` 时：
+   - 只使用 `WithRedirectHost(...)`
+
+**注意：** `WithRedirectHostHeaders(...)` 读取的是普通请求头值。只有在您明确知道请求经过受信任代理并会正确填充这些 header 时，才建议启用它。
 
 ## 优雅停机 (Graceful Shutdown)
 
-在部署新版本时，我们希望服务器停止接收新请求，但能处理完当前正在进行的请求。
+在部署新版本时，我们希望服务器停止接收新请求，但能处理完当前正在进行的请求。启用优雅关闭后，Touka 会监听 `SIGINT`/`SIGTERM`，并在关闭时取消活动请求的上下文。
 
 ```go
 r := touka.Default()
@@ -91,7 +207,7 @@ r := touka.Default()
 
 // 监听 SIGINT 和 SIGTERM 信号
 // 如果在 10 秒内未处理完，则强制关闭
-if err := r.RunShutdown(":8080", 10*time.Second); err != nil {
+if err := r.Run(touka.WithAddr(":8080"), touka.WithGracefulShutdown(10*time.Second)); err != nil {
     log.Fatal("服务器退出异常:", err)
 }
 ```

@@ -39,7 +39,7 @@ func main() {
     // 您也可以使用 StaticFS 服务根路径
     // r.StaticFS("/", http.FS(fsroot))
 
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 ```
 

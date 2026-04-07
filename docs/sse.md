@@ -125,4 +125,4 @@ r.GET("/events-graceful", func(c *touka.Context) {
 2. 随后，所有活跃请求的 `c.Request.Context()` 也会收到取消信号。
 3. 您的 SSE 处理器中的 `case <-c.Request.Context().Done():` 会立即触发，从而优雅地结束连接。
 
-**注意：** 请务必使用 `RunShutdown`、`RunTLS` 或 `RunTLSRedir` 来启动服务器，以便框架能自动管理这些信号。
+**注意：** 请务必通过 `r.Run(...)` 并显式传入优雅关闭选项来启动服务器，例如 `touka.WithGracefulShutdown(...)` 或 `touka.WithGracefulShutdownDefault()`。只有启用了优雅关闭，框架才会在服务退出时取消这些请求上下文。
