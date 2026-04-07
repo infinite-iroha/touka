@@ -709,7 +709,7 @@ func (p *reverseProxyHandler) writeLocalOptionsResponse(c *Context) {
 					allowHeader = append(allowHeader, method...)
 				}
 				c.allowHeaderBuf = allowHeader[:0]
-				c.Writer.Header().Set("Allow", BytesToString(allowHeader))
+				c.Writer.Header().Set("Allow", string(allowHeader))
 			}
 		}
 	}

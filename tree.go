@@ -723,20 +723,11 @@ func (n *node) findCaseInsensitivePath(path string, fixTrailingSlash bool) ([]by
 }
 
 func (n *node) findCaseInsensitivePathWithBuffer(path string, buf []byte, fixTrailingSlash bool) ([]byte, bool) {
-	const stackBufSize = 128 // 栈上缓冲区的默认大小
-
-	// 在常见情况下使用栈上静态大小的缓冲区.
-	// 如果路径太长, 则在堆上分配缓冲区.
 	if buf != nil {
 		buf = buf[:0]
 	}
 	if cap(buf) < len(path)+1 {
-		var stackBuf [stackBufSize]byte
-		if len(path)+1 <= stackBufSize {
-			buf = stackBuf[:0]
-		} else {
-			buf = make([]byte, 0, len(path)+1) // 如果路径太长, 则分配更大的缓冲区
-		}
+		buf = make([]byte, 0, len(path)+1)
 	}
 
 	ciPath := n.findCaseInsensitivePathRec(

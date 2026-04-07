@@ -145,7 +145,7 @@ var methodNotAllowedHandler HandlerFunc = func(c *Context) {
 				allowHeader = append(allowHeader, method...)
 			}
 			c.allowHeaderBuf = allowHeader[:0]
-			c.Writer.Header().Set("Allow", BytesToString(allowHeader))
+			c.Writer.Header().Set("Allow", string(allowHeader))
 			c.Status(http.StatusOK)
 			return
 		}
@@ -810,7 +810,7 @@ func (engine *Engine) handleRequest(c *Context) {
 				ciPath, found := rootNode.findCaseInsensitivePathWithBuffer(requestPath, c.fixedPathBuf, engine.RedirectTrailingSlash)
 				if found {
 					c.fixedPathBuf = ciPath[:0]
-					c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
+					c.Redirect(http.StatusMovedPermanently, string(ciPath)) // 301 永久重定向到修正后的路径
 					return
 				}
 				c.fixedPathBuf = ciPath[:0]
