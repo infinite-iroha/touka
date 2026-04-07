@@ -126,6 +126,12 @@ type ErrorHandler func(c *Context, code int, err error)
 var errMethodNotAllowed = errors.New("method not allowed")
 var errNotFound = errors.New("not found")
 
+type defaultErrorResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Error   string `json:"error"`
+}
+
 var methodNotAllowedHandler HandlerFunc = func(c *Context) {
 	httpMethod := c.Request.Method
 	requestPath := routeLookupPath(c.Request)
@@ -187,11 +193,7 @@ func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是
 		if err != nil {
 			errMsg = err.Error()
 		}
-		c.JSON(code, H{
-			"code":    code,
-			"message": http.StatusText(code),
-			"error":   errMsg,
-		})
+		c.JSON(code, defaultErrorResponse{Code: code, Message: http.StatusText(code), Error: errMsg})
 		c.Writer.Flush()
 		c.Abort()
 		return

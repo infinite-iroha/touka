@@ -1,6 +1,7 @@
 package touka
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -98,5 +99,25 @@ func TestOptionsAllowHeaderListsMatchingMethods(t *testing.T) {
 	allow := rr.Header().Get("Allow")
 	if allow != "GET, POST" && allow != "POST, GET" {
 		t.Fatalf("expected Allow header to list matching methods, got %q", allow)
+	}
+}
+
+func TestDefaultErrorHandleJSONShape(t *testing.T) {
+	engine := New()
+	rr := PerformRequest(engine, http.MethodGet, "/missing", nil, nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rr.Code)
+	}
+
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("expected JSON error body, got %q: %v", rr.Body.String(), err)
+	}
+	if body.Code != http.StatusNotFound || body.Message != http.StatusText(http.StatusNotFound) || body.Error != "not found" {
+		t.Fatalf("unexpected error payload: %+v", body)
 	}
 }
