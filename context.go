@@ -73,6 +73,12 @@ type Context struct {
 	// skippedNodes 用于记录跳过的节点信息，以便回溯
 	// 通常在处理嵌套路由时使用
 	SkippedNodes []skippedNode
+
+	// fixedPathBuf 用于复用固定路径重定向时的大小写修正结果缓冲.
+	fixedPathBuf []byte
+
+	allowedMethodsBuf []string
+	allowHeaderBuf    []byte
 }
 
 // --- Context 相关方法实现 ---
@@ -97,7 +103,7 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	}
 	c.handlers = nil
 	c.index = -1                          // 初始为 -1，`Next()` 将其设置为 0
-	c.Keys = make(map[string]any)         // 每次请求重新创建 map，避免数据污染
+	c.Keys = nil                          // 仅在首次 Set 时创建，避免每个请求都分配 map
 	c.Errors = c.Errors[:0]               // 清空 Errors 切片
 	c.queryCache = nil                    // 清空查询参数缓存
 	c.formCache = nil                     // 清空表单数据缓存
@@ -110,6 +116,15 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 		c.SkippedNodes = c.SkippedNodes[:0]
 	} else {
 		c.SkippedNodes = make([]skippedNode, 0, 256)
+	}
+	if cap(c.fixedPathBuf) > 0 {
+		c.fixedPathBuf = c.fixedPathBuf[:0]
+	}
+	if cap(c.allowedMethodsBuf) > 0 {
+		c.allowedMethodsBuf = c.allowedMethodsBuf[:0]
+	}
+	if cap(c.allowHeaderBuf) > 0 {
+		c.allowHeaderBuf = c.allowHeaderBuf[:0]
 	}
 }
 
