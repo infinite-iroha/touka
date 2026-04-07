@@ -48,6 +48,24 @@ func TestHandleRequestKeepsFixedPathLookupForUppercaseMiss(t *testing.T) {
 	}
 }
 
+func TestHandleRequestFixedPathLookupMissDoesNotPanic(t *testing.T) {
+	engine := New()
+	engine.GET("/Users/Profile", func(c *Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic for fixed-path miss: %v", r)
+		}
+	}()
+
+	rr := PerformRequest(engine, http.MethodGet, "/users/unknown", nil, nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected fixed-path miss to stay as 404, got %d", rr.Code)
+	}
+}
+
 func TestNoRouteCanContinueToDefaultNotFound(t *testing.T) {
 	engine := New()
 	engine.NoRoute(func(c *Context) {

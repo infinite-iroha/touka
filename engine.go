@@ -155,22 +155,25 @@ var methodNotAllowedHandler HandlerFunc = func(c *Context) {
 			c.Status(http.StatusOK)
 			return
 		}
+		return
 	}
 	// 尝试遍历所有方法树,看是否有其他方法可以匹配当前路径
+	tempSkippedNodes := GetTempSkippedNodes()
 	for _, treeIter := range engine.methodTrees {
 		if treeIter.method == httpMethod { // 已经处理过当前方法,跳过
 			continue
 		}
 		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-		tempSkippedNodes := GetTempSkippedNodes()
+		*tempSkippedNodes = (*tempSkippedNodes)[:0]
 		value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
-		PutTempSkippedNodes(tempSkippedNodes)
 		if value.handlers != nil {
+			PutTempSkippedNodes(tempSkippedNodes)
 			// 使用定义的ErrorHandle处理
 			engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errMethodNotAllowed)
 			return
 		}
 	}
+	PutTempSkippedNodes(tempSkippedNodes)
 }
 
 var notFoundHandler HandlerFunc = func(c *Context) {
@@ -815,7 +818,7 @@ func (engine *Engine) handleRequest(c *Context) {
 					c.Redirect(http.StatusMovedPermanently, string(ciPath)) // 301 永久重定向到修正后的路径
 					return
 				}
-				c.fixedPathBuf = ciPath[:0]
+				c.fixedPathBuf = c.fixedPathBuf[:0]
 			}
 		}
 	}
@@ -872,15 +875,16 @@ func (engine *Engine) allowedMethodsForPath(requestPath string, allowedMethods [
 	} else {
 		allowedMethods = allowedMethods[:0]
 	}
+	tempSkippedNodes := GetTempSkippedNodes()
 	for _, treeIter := range engine.methodTrees {
 		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-		tempSkippedNodes := GetTempSkippedNodes()
+		*tempSkippedNodes = (*tempSkippedNodes)[:0]
 		value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
-		PutTempSkippedNodes(tempSkippedNodes)
 		if value.handlers != nil {
 			allowedMethods = append(allowedMethods, treeIter.method)
 		}
 	}
+	PutTempSkippedNodes(tempSkippedNodes)
 	return allowedMethods
 }
 
