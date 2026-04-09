@@ -91,6 +91,13 @@ var reverseProxyCopyBufferPool = sync.Pool{
 	},
 }
 
+var reverseProxyCandidatePool = sync.Pool{
+	New: func() any {
+		s := make([]*reverseProxyUpstream, 0, 8)
+		return &s
+	},
+}
+
 type reverseProxyStatusError struct {
 	status int
 	err    error

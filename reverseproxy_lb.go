@@ -137,18 +137,32 @@ func validateReverseProxyLBPolicy(policy ReverseProxyLBPolicy) error {
 func (p *reverseProxyHandler) selectUpstream(c *Context, excluded map[string]struct{}) (*reverseProxyUpstream, error) {
 	now := time.Now()
 	policy := p.config.LoadBalancing.Policy
-	candidates := p.availableUpstreams(now, excluded)
+	candidateBuf := reverseProxyCandidatePool.Get().(*[]*reverseProxyUpstream)
+	candidates := p.availableUpstreamsInto(now, excluded, *candidateBuf)
 	if len(candidates) == 0 && len(excluded) > 0 {
-		candidates = p.availableUpstreams(now, nil)
+		candidates = p.availableUpstreamsInto(now, nil, candidates[:0])
 	}
 	if len(candidates) == 0 {
+		*candidateBuf = candidates[:0]
+		reverseProxyCandidatePool.Put(candidateBuf)
 		return nil, errReverseProxyNoAvailableUpstreams
 	}
-	return p.selectUpstreamWithPolicy(c, candidates, policy), nil
+	selected := p.selectUpstreamWithPolicy(c, candidates, policy)
+	*candidateBuf = candidates[:0]
+	reverseProxyCandidatePool.Put(candidateBuf)
+	return selected, nil
 }
 
 func (p *reverseProxyHandler) availableUpstreams(now time.Time, excluded map[string]struct{}) []*reverseProxyUpstream {
-	candidates := make([]*reverseProxyUpstream, 0, len(p.upstreams))
+	return p.availableUpstreamsInto(now, excluded, nil)
+}
+
+func (p *reverseProxyHandler) availableUpstreamsInto(now time.Time, excluded map[string]struct{}, candidates []*reverseProxyUpstream) []*reverseProxyUpstream {
+	if cap(candidates) < len(p.upstreams) {
+		candidates = make([]*reverseProxyUpstream, 0, len(p.upstreams))
+	} else {
+		candidates = candidates[:0]
+	}
 	for _, upstream := range p.upstreams {
 		if _, skip := excluded[upstream.key]; skip {
 			continue

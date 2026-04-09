@@ -110,10 +110,10 @@ func BenchmarkReverseProxyCopyResponse(b *testing.B) {
 func BenchmarkReverseProxyAvailableUpstreams(b *testing.B) {
 	proxy := &reverseProxyHandler{
 		upstreams: []*reverseProxyUpstream{
-			{key: "a"},
-			{key: "b"},
-			{key: "c"},
-			{key: "d"},
+			{key: "a", index: 0},
+			{key: "b", index: 1},
+			{key: "c", index: 2},
+			{key: "d", index: 3},
 		},
 		config: ReverseProxyConfig{
 			PassiveHealth: ReverseProxyPassiveHealthConfig{
@@ -132,6 +132,38 @@ func BenchmarkReverseProxyAvailableUpstreams(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		benchmarkReverseProxySink = len(proxy.availableUpstreams(now, nil))
+	}
+}
+
+func BenchmarkReverseProxySelectUpstream(b *testing.B) {
+	proxy := &reverseProxyHandler{
+		upstreams: []*reverseProxyUpstream{
+			{key: "a", index: 0},
+			{key: "b", index: 1},
+			{key: "c", index: 2},
+			{key: "d", index: 3},
+		},
+		config: ReverseProxyConfig{
+			LoadBalancing: ReverseProxyLoadBalancingConfig{Policy: LBRoundRobin()},
+			PassiveHealth: ReverseProxyPassiveHealthConfig{
+				FailDuration: time.Minute,
+				MaxFails:     3,
+			},
+		},
+	}
+	proxy.upstreams[0].failures = []time.Time{time.Now().Add(-30 * time.Second)}
+
+	c, _ := CreateTestContext(nil)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		selected, err := proxy.selectUpstream(c, nil)
+		if err != nil {
+			b.Fatalf("selectUpstream failed: %v", err)
+		}
+		benchmarkReverseProxySink = selected.index
 	}
 }
 
@@ -200,6 +232,31 @@ func TestReverseProxyCopyResponseRespectsCustomBufferLength(t *testing.T) {
 		if size != 8 {
 			t.Fatalf("expected custom buffer length 8 to be preserved, got read size %d", size)
 		}
+	}
+}
+
+func TestReverseProxyAvailableUpstreamsFiltersExcludedAndUnhealthy(t *testing.T) {
+	now := time.Now()
+	proxy := &reverseProxyHandler{
+		upstreams: []*reverseProxyUpstream{
+			{key: "a"},
+			{key: "b", failures: []time.Time{now.Add(-20 * time.Second), now.Add(-10 * time.Second)}},
+			{key: "c"},
+		},
+		config: ReverseProxyConfig{
+			PassiveHealth: ReverseProxyPassiveHealthConfig{
+				FailDuration: time.Minute,
+				MaxFails:     2,
+			},
+		},
+	}
+
+	available := proxy.availableUpstreams(now, map[string]struct{}{"c": {}})
+	if len(available) != 1 {
+		t.Fatalf("expected only one available upstream, got %d", len(available))
+	}
+	if available[0].key != "a" {
+		t.Fatalf("expected upstream 'a', got %q", available[0].key)
 	}
 }
 
