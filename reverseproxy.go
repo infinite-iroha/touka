@@ -84,6 +84,13 @@ type reverseProxyHandler struct {
 	roundRobin  atomic.Uint64
 }
 
+var reverseProxyCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
 type reverseProxyStatusError struct {
 	status int
 	err    error
@@ -1153,6 +1160,10 @@ func (p *reverseProxyHandler) copyResponse(dst ResponseWriter, src io.Reader, fl
 	if p.config.BufferPool != nil {
 		buf = p.config.BufferPool.Get()
 		defer p.config.BufferPool.Put(buf)
+	} else {
+		bufp := reverseProxyCopyBufferPool.Get().(*[]byte)
+		buf = *bufp
+		defer reverseProxyCopyBufferPool.Put(bufp)
 	}
 	_, err := p.copyBuffer(writer, src, buf)
 	return err

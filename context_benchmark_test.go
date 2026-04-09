@@ -23,7 +23,7 @@ func TestContextResetKeepsKeysNilUntilSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to build request: %v", err)
 	}
-	c.reset(c.Writer, req)
+	c.reset(UnwrapResponseWriter(c.Writer), req)
 
 	if c.Keys != nil {
 		t.Fatalf("expected reset to clear Keys without allocating a new map")
@@ -47,6 +47,7 @@ func TestContextResetKeepsKeysNilUntilSet(t *testing.T) {
 func BenchmarkContextReset(b *testing.B) {
 	b.Run("NoKeysUse", func(b *testing.B) {
 		c, _ := CreateTestContext(nil)
+		rawWriter := UnwrapResponseWriter(c.Writer)
 		req, err := http.NewRequest(http.MethodGet, "/", nil)
 		if err != nil {
 			b.Fatalf("failed to build request: %v", err)
@@ -56,12 +57,13 @@ func BenchmarkContextReset(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			c.reset(c.Writer, req)
+			c.reset(rawWriter, req)
 		}
 	})
 
 	b.Run("WithKeysUse", func(b *testing.B) {
 		c, _ := CreateTestContext(nil)
+		rawWriter := UnwrapResponseWriter(c.Writer)
 		req, err := http.NewRequest(http.MethodGet, "/", nil)
 		if err != nil {
 			b.Fatalf("failed to build request: %v", err)
@@ -71,8 +73,9 @@ func BenchmarkContextReset(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			c.reset(c.Writer, req)
+			c.reset(rawWriter, req)
 			c.Set("request-id", i)
 		}
 	})
+
 }
