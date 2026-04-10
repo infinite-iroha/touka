@@ -1866,7 +1866,9 @@ func TestReverseProxyHTTP2ExtendedConnectForcesHTTP1ToTLSUpstream(t *testing.T) 
 	if message != "echo:ping\n" {
 		t.Fatalf("unexpected tunneled response body: %q", message)
 	}
-	_ = pw.Close()
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close tunneled request body: %v", err)
+	}
 
 	select {
 	case err := <-errCh:
@@ -2215,7 +2217,9 @@ func TestReverseProxyHTTP2ExtendedConnectCancelDoesNotTriggerProxyError(t *testi
 	time.Sleep(50 * time.Millisecond)
 
 	cancel()
-	_ = pw.CloseWithError(context.Canceled)
+	if err := pw.CloseWithError(context.Canceled); err != nil {
+		t.Fatalf("close request body with cancellation: %v", err)
+	}
 	select {
 	case <-writeErrCh:
 	case <-time.After(2 * time.Second):

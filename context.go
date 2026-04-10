@@ -128,6 +128,19 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func (c *Context) writeResponseBody(data []byte, contextMsg string) {
+	if len(data) == 0 {
+		return
+	}
+	if _, err := c.Writer.Write(data); err != nil {
+		wrapped := fmt.Errorf("%s: %w", contextMsg, err)
+		c.AddError(wrapped)
+		if c != nil && c.engine != nil && c.engine.LogReco != nil {
+			c.engine.LogReco.Errorf("%s: %v", contextMsg, err)
+		}
+	}
+}
+
 // Next 在处理链中执行下一个处理函数
 // 这是中间件模式的核心，允许请求依次经过多个处理函数
 func (c *Context) Next() {
@@ -344,20 +357,20 @@ func (c *Context) Param(key string) string {
 func (c *Context) Raw(code int, contentType string, data []byte) {
 	c.Writer.Header().Set("Content-Type", contentType)
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(data)
+	c.writeResponseBody(data, "failed to write raw response")
 }
 
 // String 向响应写入格式化的字符串
 func (c *Context) String(code int, format string, values ...any) {
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(fmt.Appendf(nil, format, values...))
+	c.writeResponseBody(fmt.Appendf(nil, format, values...), "failed to write string response")
 }
 
 // Text 向响应写入无需格式化的string
 func (c *Context) Text(code int, text string) {
 	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write([]byte(text))
+	c.writeResponseBody([]byte(text), "failed to write text response")
 }
 
 // FileText
@@ -495,7 +508,7 @@ func (c *Context) JSONBuf(code int, obj any) {
 
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(buf.Bytes())
+	c.writeResponseBody(buf.Bytes(), "failed to write buffered JSON response")
 }
 
 // GOB 向响应写入GOB数据
@@ -524,7 +537,7 @@ func (c *Context) GOBBuf(code int, obj any) {
 	}
 	c.Writer.Header().Set("Content-Type", "application/octet-stream")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(buf.Bytes())
+	c.writeResponseBody(buf.Bytes(), "failed to write buffered GOB response")
 }
 
 // WANF向响应写入WANF数据
@@ -553,7 +566,7 @@ func (c *Context) WANFBuf(code int, obj any) {
 	}
 	c.Writer.Header().Set("Content-Type", "application/vnd.wjqserver.wanf; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(buf.Bytes())
+	c.writeResponseBody(buf.Bytes(), "failed to write buffered WANF response")
 }
 
 // HTML 渲染 HTML 模板
@@ -577,7 +590,7 @@ func (c *Context) HTML(code int, name string, obj any) {
 		// 可以扩展支持其他渲染器接口
 	}
 	// 默认简单输出，用于未配置 HTMLRender 的情况
-	c.Writer.Write(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj))
+	c.writeResponseBody(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj), "failed to write HTML response")
 }
 
 // HTMLBuf 先将 HTML 模板渲染到 buffer, 成功后再写入状态码和响应体.
@@ -602,7 +615,7 @@ func (c *Context) HTMLBuf(code int, name string, obj any) {
 		// 渲染成功，写入响应
 		c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 		c.Writer.WriteHeader(code)
-		c.Writer.Write(buf.Bytes())
+		c.writeResponseBody(buf.Bytes(), "failed to write buffered HTML response")
 		return
 	}
 
@@ -938,7 +951,7 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 		}
 	}()
 
-	data, err := iox.ReadAll(body)
+	data, err := io.ReadAll(body)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -959,7 +972,7 @@ func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
 		}
 	}()
 
-	data, err := iox.ReadAll(body)
+	data, err := io.ReadAll(body)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)

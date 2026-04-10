@@ -154,7 +154,7 @@ func writeDefaultErrorJSON(c *Context, code int, body []byte) {
 	}
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	_, _ = c.Writer.Write(body)
+	c.writeResponseBody(body, "failed to write default error response")
 	c.Writer.Flush()
 	c.Abort()
 }

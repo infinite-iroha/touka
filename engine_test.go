@@ -1,10 +1,65 @@
 package touka
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
+	"html/template"
+	"net"
 	"net/http"
 	"testing"
 )
+
+type failingResponseWriter struct {
+	header http.Header
+	status int
+	err    error
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingResponseWriter) WriteHeader(statusCode int) {
+	if w.status == 0 {
+		w.status = statusCode
+	}
+}
+
+func (w *failingResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if w.err != nil {
+		return 0, w.err
+	}
+	return len(p), nil
+}
+
+func (w *failingResponseWriter) Flush() {}
+
+func (w *failingResponseWriter) Status() int {
+	return w.status
+}
+
+func (w *failingResponseWriter) Size() int {
+	return 0
+}
+
+func (w *failingResponseWriter) Written() bool {
+	return w.status != 0
+}
+
+func (w *failingResponseWriter) IsHijacked() bool {
+	return false
+}
+
+func (w *failingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, http.ErrNotSupported
+}
 
 func TestHandleRequestRedirectFixedPath(t *testing.T) {
 	engine := New()
@@ -183,5 +238,69 @@ func TestCustomErrorHandlerStillOverridesDefaultFastPath(t *testing.T) {
 	}
 	if rr.Body.String() != "custom:method not allowed" {
 		t.Fatalf("expected custom error body, got %q", rr.Body.String())
+	}
+}
+
+func TestResponseHelpersCaptureWriteErrors(t *testing.T) {
+	testCases := []struct {
+		name string
+		run  func(*Context)
+	}{
+		{name: "Raw", run: func(c *Context) { c.Raw(http.StatusOK, "application/octet-stream", []byte("payload")) }},
+		{name: "String", run: func(c *Context) { c.String(http.StatusOK, "value=%d", 1) }},
+		{name: "Text", run: func(c *Context) { c.Text(http.StatusOK, "payload") }},
+		{name: "JSONBuf", run: func(c *Context) { c.JSONBuf(http.StatusOK, map[string]string{"a": "b"}) }},
+		{name: "GOBBuf", run: func(c *Context) { c.GOBBuf(http.StatusOK, struct{ A string }{A: "b"}) }},
+		{name: "WANFBuf", run: func(c *Context) { c.WANFBuf(http.StatusOK, map[string]string{"a": "b"}) }},
+		{name: "HTMLFallback", run: func(c *Context) { c.HTML(http.StatusOK, "page", map[string]string{"a": "b"}) }},
+		{name: "HTMLBuf", run: func(c *Context) {
+			c.engine.HTMLRender = template.Must(template.New("page").Parse(`{{.a}}`))
+			c.HTMLBuf(http.StatusOK, "page", map[string]string{"a": "b"})
+		}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			writerErr := errors.New("write failed")
+			w := &failingResponseWriter{err: writerErr}
+			c, _ := CreateTestContext(w)
+
+			tc.run(c)
+
+			if got := len(c.Errors); got != 1 {
+				t.Fatalf("expected exactly one captured error, got %d", got)
+			}
+			if !errors.Is(c.Errors[len(c.Errors)-1], writerErr) {
+				t.Fatalf("expected captured error to wrap write failure, got %v", c.Errors[len(c.Errors)-1])
+			}
+		})
+	}
+}
+
+func TestDefaultErrorFastPathCapturesWriteErrors(t *testing.T) {
+	writerErr := errors.New("write failed")
+	w := &failingResponseWriter{err: writerErr}
+	engine := New()
+	c, _ := CreateTestContext(w)
+	c.engine = engine
+	req, err := http.NewRequest(http.MethodGet, "/missing", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	c.reset(w, req)
+
+	defaultErrorHandle(c, http.StatusNotFound, errNotFound)
+
+	if len(c.Errors) == 0 {
+		t.Fatal("expected write error to be captured")
+	}
+	if !errors.Is(c.Errors[len(c.Errors)-1], writerErr) {
+		t.Fatalf("expected captured error to wrap write failure, got %v", c.Errors[len(c.Errors)-1])
+	}
+	if c.Writer.Status() != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, c.Writer.Status())
+	}
+	if !c.IsAborted() {
+		t.Fatal("expected fast path to abort context")
 	}
 }

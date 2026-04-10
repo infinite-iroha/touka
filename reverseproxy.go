@@ -1041,7 +1041,7 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 	go copyer.copyFromBackend(errc)
 
 	var firstErr error
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		err := <-errc
 		if reverseProxyIsBenignTunnelError(err) {
 			continue
@@ -1123,7 +1123,7 @@ func (p *reverseProxyHandler) handleExtendedConnectResponse(c *Context, req *htt
 	}()
 
 	var firstErr error
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		err := <-errc
 		if reverseProxyIsBenignTunnelError(err) {
 			continue
@@ -1587,8 +1587,8 @@ func reverseProxyViaProtocol(major, minor int, raw string) string {
 	if major > 0 {
 		return strconv.Itoa(major) + "." + strconv.Itoa(minor)
 	}
-	if strings.HasPrefix(raw, "HTTP/") {
-		return strings.TrimPrefix(raw, "HTTP/")
+	if after, ok := strings.CutPrefix(raw, "HTTP/"); ok {
+		return after
 	}
 	return raw
 }
@@ -1702,7 +1702,7 @@ var reverseProxyHopHeaders = []string{
 
 func removeHopByHopHeaders(header http.Header) {
 	for _, connectionValue := range header["Connection"] {
-		for _, token := range strings.Split(connectionValue, ",") {
+		for token := range strings.SplitSeq(connectionValue, ",") {
 			trimmed := textproto.TrimString(token)
 			if trimmed != "" {
 				header.Del(trimmed)
@@ -1726,7 +1726,7 @@ func headerValuesContainToken(values []string, token string) bool {
 		return false
 	}
 	for _, value := range values {
-		for _, part := range strings.Split(value, ",") {
+		for part := range strings.SplitSeq(value, ",") {
 			if strings.EqualFold(textproto.TrimString(part), token) {
 				return true
 			}

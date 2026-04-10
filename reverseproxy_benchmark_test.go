@@ -235,7 +235,7 @@ func (r *recordingReader) Read(p []byte) (int, error) {
 	if n == 0 {
 		return 0, errors.New("reader received zero-length buffer")
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		p[i] = 'x'
 	}
 	r.left -= n

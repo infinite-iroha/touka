@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -404,10 +405,5 @@ func reverseProxyStatusIsUnhealthy(config ReverseProxyPassiveHealthConfig, statu
 	if status <= 0 {
 		return false
 	}
-	for _, unhealthyStatus := range config.UnhealthyStatus {
-		if status == unhealthyStatus {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(config.UnhealthyStatus, status)
 }
