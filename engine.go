@@ -19,6 +19,7 @@ import (
 
 	"github.com/WJQSERVER-STUDIO/httpc"
 	"github.com/fenthope/reco"
+	"github.com/go-json-experiment/json"
 )
 
 // Last 返回链中的最后一个处理函数
@@ -132,6 +133,32 @@ type defaultErrorResponse struct {
 	Error   string `json:"error"`
 }
 
+var defaultNotFoundBody = mustMarshalDefaultErrorBody(http.StatusNotFound, errNotFound.Error())
+var defaultMethodNotAllowedBody = mustMarshalDefaultErrorBody(http.StatusMethodNotAllowed, errMethodNotAllowed.Error())
+
+func mustMarshalDefaultErrorBody(code int, errMsg string) []byte {
+	body, err := json.Marshal(defaultErrorResponse{
+		Code:    code,
+		Message: http.StatusText(code),
+		Error:   errMsg,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func writeDefaultErrorJSON(c *Context, code int, body []byte) {
+	if c == nil || c.Writer == nil {
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	_, _ = c.Writer.Write(body)
+	c.Writer.Flush()
+	c.Abort()
+}
+
 var methodNotAllowedHandler HandlerFunc = func(c *Context) {
 	httpMethod := c.Request.Method
 	requestPath := routeLookupPath(c.Request)
@@ -190,6 +217,16 @@ func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是
 	default:
 		if c.Writer.Written() {
 			return
+		}
+		if len(c.Errors) == 0 {
+			switch {
+			case code == http.StatusNotFound && errors.Is(err, errNotFound):
+				writeDefaultErrorJSON(c, code, defaultNotFoundBody)
+				return
+			case code == http.StatusMethodNotAllowed && errors.Is(err, errMethodNotAllowed):
+				writeDefaultErrorJSON(c, code, defaultMethodNotAllowedBody)
+				return
+			}
 		}
 		// 输出json 状态码与状态码对应描述
 		var errMsg string

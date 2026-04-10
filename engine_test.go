@@ -139,3 +139,49 @@ func TestDefaultErrorHandleJSONShape(t *testing.T) {
 		t.Fatalf("unexpected error payload: %+v", body)
 	}
 }
+
+func TestDefaultMethodNotAllowedJSONShape(t *testing.T) {
+	engine := New()
+	engine.GET("/users", func(c *Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	rr := PerformRequest(engine, http.MethodDelete, "/users", nil, nil)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
+	}
+
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("expected JSON error body, got %q: %v", rr.Body.String(), err)
+	}
+	if body.Code != http.StatusMethodNotAllowed || body.Message != http.StatusText(http.StatusMethodNotAllowed) || body.Error != "method not allowed" {
+		t.Fatalf("unexpected error payload: %+v", body)
+	}
+}
+
+func TestCustomErrorHandlerStillOverridesDefaultFastPath(t *testing.T) {
+	engine := New()
+	engine.SetErrorHandler(func(c *Context, code int, err error) {
+		c.Writer.Header().Set("X-Custom-Error", "1")
+		c.String(code, "custom:%v", err)
+	})
+	engine.GET("/users", func(c *Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	rr := PerformRequest(engine, http.MethodDelete, "/users", nil, nil)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
+	}
+	if got := rr.Header().Get("X-Custom-Error"); got != "1" {
+		t.Fatalf("expected custom error header, got %q", got)
+	}
+	if rr.Body.String() != "custom:method not allowed" {
+		t.Fatalf("expected custom error body, got %q", rr.Body.String())
+	}
+}
