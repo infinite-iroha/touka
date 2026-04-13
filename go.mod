@@ -3,7 +3,7 @@ module github.com/infinite-iroha/touka
 go 1.26
 
 require (
-	github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.2
+	github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.3
 	github.com/WJQSERVER-STUDIO/httpc v0.9.0
 	github.com/WJQSERVER/wanf v0.0.8
 	github.com/fenthope/reco v0.0.5
