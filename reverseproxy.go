@@ -1014,7 +1014,7 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 	responseHeader := c.Writer.Header()
 	reverseProxyCopyHeader(responseHeader, res.Header)
 	removeHopByHopHeaders(responseHeader)
-	if accept := res.Header.Get("Sec-WebSocket-Accept"); accept != "" {
+	if res.Header.Get("Sec-WebSocket-Accept") != "" {
 		responseHeader.Del("Sec-WebSocket-Accept")
 	}
 	c.Writer.WriteHeader(http.StatusOK)
