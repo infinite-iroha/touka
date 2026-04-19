@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,9 +81,17 @@ var (
 )
 
 type HeaderOps struct {
-	Add map[string][]string
-	Set map[string][]string
-	Delete []string
+	Add     map[string][]string
+	Set     map[string][]string
+	Delete  []string
+	Replace map[string][]Replacement
+}
+
+type Replacement struct {
+	Search       string
+	Replace      string
+	SearchRegexp string
+	re           *regexp.Regexp
 }
 
 type RespHeaderOps struct {
@@ -146,6 +155,8 @@ func (ops *HeaderOps) applyToRequest(req *http.Request) {
 			req.Header.Del(fieldName)
 		}
 	}
+
+	ops.applyReplace(req.Header, replacer)
 }
 
 func (ops *RespHeaderOps) applyToResponse(hdr http.Header) {
@@ -216,6 +227,71 @@ func (ops *HeaderOps) applyTo(hdr http.Header, repl *reverseProxyReplacer) {
 			hdr.Del(fieldName)
 		}
 	}
+
+	ops.applyReplace(hdr, repl)
+}
+
+func (ops *HeaderOps) applyReplace(hdr http.Header, repl *reverseProxyReplacer) {
+	if ops == nil || len(ops.Replace) == 0 {
+		return
+	}
+	for fieldName, replacements := range ops.Replace {
+		fieldName = http.CanonicalHeaderKey(repl.Replace(fieldName))
+		if fieldName == "*" {
+			for fn, vals := range hdr {
+				for i := range vals {
+					for _, r := range replacements {
+						hdr[fn][i] = r.apply(vals[i])
+					}
+				}
+			}
+			continue
+		}
+		vals, ok := hdr[fieldName]
+		if !ok {
+			continue
+		}
+		for i := range vals {
+			for _, r := range replacements {
+				hdr[fieldName][i] = r.apply(vals[i])
+			}
+		}
+	}
+}
+
+func (r *Replacement) apply(s string) string {
+	if r == nil || s == "" {
+		return s
+	}
+	if r.SearchRegexp != "" && r.re != nil {
+		return r.re.ReplaceAllString(s, r.Replace)
+	}
+	if r.Search != "" {
+		return strings.ReplaceAll(s, r.Search, r.Replace)
+	}
+	return s
+}
+
+func (ops *HeaderOps) Provision() error {
+	if ops == nil {
+		return nil
+	}
+	for fieldName, replacements := range ops.Replace {
+		for i, r := range replacements {
+			if r.SearchRegexp == "" {
+				continue
+			}
+			if r.Search != "" {
+				return fmt.Errorf("replacement %d for header field %q: cannot specify both Search and SearchRegexp", i, fieldName)
+			}
+			re, err := regexp.Compile(r.SearchRegexp)
+			if err != nil {
+				return fmt.Errorf("replacement %d for header field %q: %v", i, fieldName, err)
+			}
+			replacements[i].re = re
+		}
+	}
+	return nil
 }
 
 type reverseProxyReplacer struct {
@@ -415,6 +491,19 @@ func newReverseProxyHandler(config ReverseProxyConfig) *reverseProxyHandler {
 	proxy := &reverseProxyHandler{
 		config:     config,
 		receivedBy: reverseProxyReceivedBy(config.Via),
+	}
+
+	if config.RequestHeaders != nil {
+		if err := config.RequestHeaders.Provision(); err != nil {
+			proxy.configError = err
+			return proxy
+		}
+	}
+	if config.ResponseHeaders != nil && config.ResponseHeaders.HeaderOps != nil {
+		if err := config.ResponseHeaders.HeaderOps.Provision(); err != nil {
+			proxy.configError = err
+			return proxy
+		}
 	}
 
 	upstreams, err := buildReverseProxyUpstreams(config)
