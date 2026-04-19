@@ -48,33 +48,194 @@ type BufferPool interface {
 
 // ReverseProxyConfig configures the reverse proxy handler.
 type ReverseProxyConfig struct {
-	Target  *url.URL
+	Target *url.URL
 	Targets []string
 
 	LoadBalancing ReverseProxyLoadBalancingConfig
 	PassiveHealth ReverseProxyPassiveHealthConfig
 
-	Transport        http.RoundTripper
-	FlushInterval    time.Duration
-	BufferPool       BufferPool
+	Transport http.RoundTripper
+	FlushInterval time.Duration
+	BufferPool BufferPool
 	AllowH2CUpstream bool
 
-	ModifyRequest  func(*http.Request)
+	ModifyRequest func(*http.Request)
 	ModifyResponse func(*http.Response) error
-	ErrorHandler   func(http.ResponseWriter, *http.Request, error)
+	ErrorHandler func(http.ResponseWriter, *http.Request, error)
 
 	ForwardedHeaders ForwardedHeadersPolicy
-	ForwardedBy      string
-	Via              string
-	PreserveHost     bool
+	ForwardedBy string
+	Via string
+	PreserveHost bool
+
+	RequestHeaders *HeaderOps
+	ResponseHeaders *RespHeaderOps
 }
 
 var (
-	errReverseProxyNilTarget            = errors.New("reverse proxy target is nil")
-	errReverseProxyInvalidTarget        = errors.New("reverse proxy target must include scheme and host")
-	errReverseProxyCopyDone             = errors.New("reverse proxy switch protocol copy complete")
+	errReverseProxyNilTarget = errors.New("reverse proxy target is nil")
+	errReverseProxyInvalidTarget = errors.New("reverse proxy target must include scheme and host")
+	errReverseProxyCopyDone = errors.New("reverse proxy switch protocol copy complete")
 	errReverseProxyNoAvailableUpstreams = errors.New("reverse proxy has no available upstreams")
 )
+
+type HeaderOps struct {
+	Add map[string][]string
+	Set map[string][]string
+	Delete []string
+}
+
+type RespHeaderOps struct {
+	*HeaderOps
+	Deferred bool
+}
+
+func (ops *HeaderOps) applyToRequest(req *http.Request) {
+	if ops == nil {
+		return
+	}
+	replacer := newReverseProxyReplacer(req)
+	
+	for fieldName, vals := range ops.Add {
+		fieldName = replacer.Replace(fieldName)
+		for _, v := range vals {
+			req.Header.Add(fieldName, replacer.Replace(v))
+		}
+	}
+	
+	for fieldName, vals := range ops.Set {
+		fieldName = replacer.Replace(fieldName)
+		req.Header.Del(fieldName)
+		for _, v := range vals {
+			req.Header.Add(fieldName, replacer.Replace(v))
+		}
+	}
+	
+	for _, fieldName := range ops.Delete {
+		fieldName = strings.ToLower(replacer.Replace(fieldName))
+		if fieldName == "*" {
+			for k := range req.Header {
+				req.Header.Del(k)
+			}
+			continue
+		}
+		
+		switch {
+		case strings.HasPrefix(fieldName, "*") && strings.HasSuffix(fieldName, "*"):
+			pattern := fieldName[1:len(fieldName)-1]
+			for k := range req.Header {
+				if strings.Contains(strings.ToLower(k), pattern) {
+					req.Header.Del(k)
+				}
+			}
+		case strings.HasPrefix(fieldName, "*"):
+			suffix := fieldName[1:]
+			for k := range req.Header {
+				if strings.HasSuffix(strings.ToLower(k), suffix) {
+					req.Header.Del(k)
+				}
+			}
+		case strings.HasSuffix(fieldName, "*"):
+			prefix := fieldName[:len(fieldName)-1]
+			for k := range req.Header {
+				if strings.HasPrefix(strings.ToLower(k), prefix) {
+					req.Header.Del(k)
+				}
+			}
+		default:
+			req.Header.Del(fieldName)
+		}
+	}
+}
+
+func (ops *RespHeaderOps) applyToResponse(hdr http.Header) {
+	if ops == nil {
+		return
+	}
+	if ops.Deferred {
+		return
+	}
+	ops.applyTo(hdr, newReverseProxyReplacerFromHeader(hdr))
+}
+
+func (ops *HeaderOps) applyTo(hdr http.Header, repl *reverseProxyReplacer) {
+	if ops == nil {
+		return
+	}
+	if repl == nil {
+		repl = &reverseProxyReplacer{}
+	}
+	
+	for fieldName, vals := range ops.Add {
+		fieldName = repl.Replace(fieldName)
+		for _, v := range vals {
+			hdr.Add(fieldName, repl.Replace(v))
+		}
+	}
+	
+	for fieldName, vals := range ops.Set {
+		fieldName = repl.Replace(fieldName)
+		hdr.Del(fieldName)
+		for _, v := range vals {
+			hdr.Add(fieldName, repl.Replace(v))
+		}
+	}
+	
+	for _, fieldName := range ops.Delete {
+		fieldName = strings.ToLower(repl.Replace(fieldName))
+		if fieldName == "*" {
+			for k := range hdr {
+				hdr.Del(k)
+			}
+			continue
+		}
+		
+		switch {
+		case strings.HasPrefix(fieldName, "*") && strings.HasSuffix(fieldName, "*"):
+			pattern := fieldName[1:len(fieldName)-1]
+			for k := range hdr {
+				if strings.Contains(strings.ToLower(k), pattern) {
+					hdr.Del(k)
+				}
+			}
+		case strings.HasPrefix(fieldName, "*"):
+			suffix := fieldName[1:]
+			for k := range hdr {
+				if strings.HasSuffix(strings.ToLower(k), suffix) {
+					hdr.Del(k)
+				}
+			}
+		case strings.HasSuffix(fieldName, "*"):
+			prefix := fieldName[:len(fieldName)-1]
+			for k := range hdr {
+				if strings.HasPrefix(strings.ToLower(k), prefix) {
+					hdr.Del(k)
+				}
+			}
+		default:
+			hdr.Del(fieldName)
+		}
+	}
+}
+
+type reverseProxyReplacer struct {
+	req *http.Request
+}
+
+func newReverseProxyReplacer(req *http.Request) *reverseProxyReplacer {
+	return &reverseProxyReplacer{req: req}
+}
+
+func newReverseProxyReplacerFromHeader(hdr http.Header) *reverseProxyReplacer {
+	return &reverseProxyReplacer{}
+}
+
+func (r *reverseProxyReplacer) Replace(s string) string {
+	if r == nil || s == "" {
+		return s
+	}
+	return s
+}
 
 type reverseProxyHandler struct {
 	config      ReverseProxyConfig
@@ -573,6 +734,10 @@ func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Conte
 		outreq.Header.Set("User-Agent", "")
 	}
 
+	if p.config.RequestHeaders != nil {
+		p.config.RequestHeaders.applyToRequest(outreq)
+	}
+
 	if p.config.ModifyRequest != nil {
 		p.config.ModifyRequest(outreq)
 	}
@@ -808,6 +973,10 @@ func appendXForwardedFor(header http.Header, clientIP string) {
 }
 
 func (p *reverseProxyHandler) modifyResponse(c *Context, res *http.Response, req *http.Request) bool {
+	if p.config.ResponseHeaders != nil && !p.config.ResponseHeaders.Deferred {
+		p.config.ResponseHeaders.applyToResponse(res.Header)
+	}
+	
 	if p.config.ModifyResponse == nil {
 		return true
 	}
