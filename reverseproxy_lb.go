@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -199,7 +200,7 @@ func (p *reverseProxyHandler) selectUpstreamWithPolicy(c *Context, candidates []
 	case reverseProxyLBPolicyHeader:
 		if c.Request != nil && c.Request.Header != nil {
 			if values, ok := c.Request.Header[policy.key]; ok {
-				return reverseProxySelectHRW(candidates, strings.Join(values, ","))
+				return reverseProxySelectHRWValues(candidates, values)
 			}
 		}
 		return p.selectUpstreamWithPolicy(c, candidates, reverseProxyFallbackPolicy(policy))
@@ -277,6 +278,25 @@ func reverseProxySelectHRW(candidates []*reverseProxyUpstream, key string) *reve
 	return selected
 }
 
+func reverseProxySelectHRWValues(candidates []*reverseProxyUpstream, values []string) *reverseProxyUpstream {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(values) == 0 {
+		return reverseProxySelectRandom(candidates)
+	}
+	selected := candidates[0]
+	bestScore := reverseProxyHRWValuesScore(values, selected.key)
+	for _, upstream := range candidates[1:] {
+		score := reverseProxyHRWValuesScore(values, upstream.key)
+		if score > bestScore {
+			selected = upstream
+			bestScore = score
+		}
+	}
+	return selected
+}
+
 func reverseProxyHRWScore(key, upstreamKey string) uint64 {
 	const (
 		offset64 = 14695981039346656037
@@ -286,6 +306,31 @@ func reverseProxyHRWScore(key, upstreamKey string) uint64 {
 	for i := 0; i < len(key); i++ {
 		h ^= uint64(key[i])
 		h *= prime64
+	}
+	h ^= 0xff
+	h *= prime64
+	for i := 0; i < len(upstreamKey); i++ {
+		h ^= uint64(upstreamKey[i])
+		h *= prime64
+	}
+	return h
+}
+
+func reverseProxyHRWValuesScore(values []string, upstreamKey string) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for valueIndex, value := range values {
+		for i := 0; i < len(value); i++ {
+			h ^= uint64(value[i])
+			h *= prime64
+		}
+		if valueIndex+1 < len(values) {
+			h ^= ','
+			h *= prime64
+		}
 	}
 	h ^= 0xff
 	h *= prime64
@@ -360,10 +405,5 @@ func reverseProxyStatusIsUnhealthy(config ReverseProxyPassiveHealthConfig, statu
 	if status <= 0 {
 		return false
 	}
-	for _, unhealthyStatus := range config.UnhealthyStatus {
-		if status == unhealthyStatus {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(config.UnhealthyStatus, status)
 }

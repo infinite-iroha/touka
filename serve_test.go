@@ -182,8 +182,7 @@ func TestBuildRedirectServerRejectsHTTPSAddrWithoutPort(t *testing.T) {
 
 func TestValidateRunConfigRejectsShutdownContextWithoutGraceful(t *testing.T) {
 	cfg := defaultRunConfig()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	if err := WithShutdownContext(ctx).apply(&cfg); err != nil {
 		t.Fatalf("apply shutdown context option: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,6 +168,33 @@ func BenchmarkReverseProxySelectUpstream(b *testing.B) {
 	}
 }
 
+func BenchmarkReverseProxySelectUpstreamHeaderPolicy(b *testing.B) {
+	proxy := &reverseProxyHandler{
+		upstreams: []*reverseProxyUpstream{
+			{key: "a", index: 0},
+			{key: "b", index: 1},
+			{key: "c", index: 2},
+			{key: "d", index: 3},
+		},
+		config: ReverseProxyConfig{
+			LoadBalancing: ReverseProxyLoadBalancingConfig{Policy: LBHeader("X-Tenant", LBRandom())},
+		},
+	}
+	c, _ := CreateTestContext(nil)
+	c.Request.Header["X-Tenant"] = []string{"tenant-a", "tenant-b", "tenant-c"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		selected, err := proxy.selectUpstream(c, nil)
+		if err != nil {
+			b.Fatalf("selectUpstream failed: %v", err)
+		}
+		benchmarkReverseProxySink = selected.index
+	}
+}
+
 func TestReverseProxyCopyResponseWithoutBufferPool(t *testing.T) {
 	proxy := newReverseProxyHandler(ReverseProxyConfig{})
 	dst := newBenchmarkResponseWriter()
@@ -207,7 +235,7 @@ func (r *recordingReader) Read(p []byte) (int, error) {
 	if n == 0 {
 		return 0, errors.New("reader received zero-length buffer")
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		p[i] = 'x'
 	}
 	r.left -= n
@@ -257,6 +285,70 @@ func TestReverseProxyAvailableUpstreamsFiltersExcludedAndUnhealthy(t *testing.T)
 	}
 	if available[0].key != "a" {
 		t.Fatalf("expected upstream 'a', got %q", available[0].key)
+	}
+}
+
+func TestReverseProxyHeaderPolicyUsesAllHeaderValues(t *testing.T) {
+	proxy := &reverseProxyHandler{
+		upstreams: []*reverseProxyUpstream{
+			{key: "a", index: 0},
+			{key: "b", index: 1},
+			{key: "c", index: 2},
+		},
+		config: ReverseProxyConfig{
+			LoadBalancing: ReverseProxyLoadBalancingConfig{Policy: LBHeader("X-Tenant", LBRandom())},
+		},
+	}
+
+	c, _ := CreateTestContext(nil)
+	c.Request.Header["X-Tenant"] = []string{"tenant-a", "tenant-b"}
+
+	selectedA, err := proxy.selectUpstream(c, nil)
+	if err != nil {
+		t.Fatalf("selectUpstream failed: %v", err)
+	}
+	selectedB, err := proxy.selectUpstream(c, nil)
+	if err != nil {
+		t.Fatalf("selectUpstream failed: %v", err)
+	}
+	if selectedA.key != selectedB.key {
+		t.Fatalf("expected stable selection for identical multi-value header, got %q and %q", selectedA.key, selectedB.key)
+	}
+
+	c.Request.Header["X-Tenant"] = []string{"tenant-b", "tenant-a"}
+	selectedC, err := proxy.selectUpstream(c, nil)
+	if err != nil {
+		t.Fatalf("selectUpstream failed: %v", err)
+	}
+	if selectedC == nil {
+		t.Fatal("expected upstream for reordered multi-value header")
+	}
+}
+
+func TestReverseProxyHeaderPolicyMatchesJoinCompatibility(t *testing.T) {
+	candidates := []*reverseProxyUpstream{
+		{key: "a", index: 0},
+		{key: "b", index: 1},
+		{key: "c", index: 2},
+	}
+
+	testCases := [][]string{
+		{"tenant-a"},
+		{"tenant-a", "tenant-b"},
+		{"", "tenant-b"},
+		{"tenant-a", ""},
+		{"", ""},
+	}
+
+	for _, values := range testCases {
+		got := reverseProxySelectHRWValues(candidates, values)
+		want := reverseProxySelectHRW(candidates, strings.Join(values, ","))
+		if got == nil || want == nil {
+			t.Fatalf("expected non-nil upstreams for values %v", values)
+		}
+		if got.key != want.key {
+			t.Fatalf("expected joined compatibility for values %v, got %q want %q", values, got.key, want.key)
+		}
 	}
 }
 
