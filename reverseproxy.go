@@ -264,11 +264,26 @@ func (ops *HeaderOps) Provision() error {
 }
 
 type reverseProxyReplacer struct {
-	req *http.Request
+	method, host, path, query, scheme, uri, proto string
 }
 
 func newReverseProxyReplacer(req *http.Request) *reverseProxyReplacer {
-	return &reverseProxyReplacer{req: req}
+	if req == nil || req.URL == nil {
+		return &reverseProxyReplacer{}
+	}
+	uri := req.RequestURI
+	if uri == "" {
+		uri = req.URL.RequestURI()
+	}
+	return &reverseProxyReplacer{
+		method: req.Method,
+		host:   req.Host,
+		path:   req.URL.EscapedPath(),
+		query:  req.URL.RawQuery,
+		scheme: reverseProxyRequestScheme(req),
+		uri:    uri,
+		proto:  req.Proto,
+	}
 }
 
 func newReverseProxyReplacerFromHeader(hdr http.Header) *reverseProxyReplacer {
@@ -278,6 +293,27 @@ func newReverseProxyReplacerFromHeader(hdr http.Header) *reverseProxyReplacer {
 func (r *reverseProxyReplacer) Replace(s string) string {
 	if r == nil || s == "" {
 		return s
+	}
+	if r.method != "" {
+		s = strings.ReplaceAll(s, "{method}", r.method)
+	}
+	if r.host != "" {
+		s = strings.ReplaceAll(s, "{host}", r.host)
+	}
+	if r.path != "" {
+		s = strings.ReplaceAll(s, "{path}", r.path)
+	}
+	if r.query != "" {
+		s = strings.ReplaceAll(s, "{query}", r.query)
+	}
+	if r.scheme != "" {
+		s = strings.ReplaceAll(s, "{scheme}", r.scheme)
+	}
+	if r.uri != "" {
+		s = strings.ReplaceAll(s, "{uri}", r.uri)
+	}
+	if r.proto != "" {
+		s = strings.ReplaceAll(s, "{proto}", r.proto)
 	}
 	return s
 }
