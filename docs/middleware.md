@@ -104,7 +104,7 @@ func APIKeyAuth() touka.HandlerFunc {
 
 ## 中间件执行顺序
 
-理解中间件的执行顺序对于构建正确的处理流程至关重要。中间件按照以下顺序执行：
+理解中间件的执行顺序对于构建正确的处理流程至关重要。**注意：注册顺序决定了执行逻辑**，中间件必须在注册路由之前调用（全局中间件应在创建组或定义路由前注册）。中间件按照以下顺序执行：
 
 ```go
 // 全局中间件
@@ -122,14 +122,14 @@ api.GET("/users", RouteMiddleware1(), RouteMiddleware2(), userHandler)
 对于 `/api/users` 请求，执行顺序为：
 1. `GlobalMiddleware1()` - 全局中间件
 2. `GlobalMiddleware2()` - 全局中间件
-3. `GroupMiddleware1()` - 组中间件
-4. `GroupMiddleware2()` - 组中间件
+3. `GroupMiddleware1()` - 路由组中间件
+4. `GroupMiddleware2()` - 路由组中间件
 5. `RouteMiddleware1()` - 路由级中间件
 6. `RouteMiddleware2()` - 路由级中间件
 7. `userHandler` - 最终处理函数
 
 ```
-请求进入 → 全局中间件 → 组中间件 → 路由中间件 → 处理函数 → 路由中间件后置逻辑 → 组中间件后置逻辑 → 全局中间件后置逻辑 → 响应
+请求进入 → 全局中间件 → 路由组中间件 → 路由级中间件 → 最终处理函数 → 路由级中间件后置逻辑 → 路由组中间件后置逻辑 → 全局中间件后置逻辑 → 响应
 ```
 
 ## 内置中间件
