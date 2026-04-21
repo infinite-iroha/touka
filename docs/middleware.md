@@ -26,6 +26,41 @@ api.Use(AuthMiddleware())
 }
 ```
 
+也可以在创建组时直接传入中间件：
+
+```go
+api := r.Group("/api", AuthMiddleware(), RateLimitMiddleware())
+{
+    api.GET("/user", handleUser)
+    api.POST("/data", handleData)
+}
+```
+
+### 路由级中间件
+
+为单个路由注册中间件，仅对该路由生效。
+
+```go
+// 单个路由中间件
+r.GET("/protected", AuthMiddleware(), func(c *touka.Context) {
+    c.String(http.StatusOK, "Protected content")
+})
+
+// 多个路由中间件（按顺序执行）
+r.POST("/upload",
+    RateLimitMiddleware(),
+    AuthMiddleware(),
+    PermissionCheckMiddleware(),
+    func(c *touka.Context) {
+        // 处理上传
+    },
+)
+
+// 路由组中的单个路由也可以使用路由级中间件
+api := r.Group("/api")
+api.GET("/admin", AdminAuthMiddleware(), adminHandler)
+```
+
 ## 编写自定义中间件
 
 中间件的函数签名是 `touka.HandlerFunc`。
@@ -65,6 +100,36 @@ func APIKeyAuth() touka.HandlerFunc {
         c.Next()
     }
 }
+```
+
+## 中间件执行顺序
+
+理解中间件的执行顺序对于构建正确的处理流程至关重要。中间件按照以下顺序执行：
+
+```go
+// 全局中间件
+r.Use(GlobalMiddleware1())
+r.Use(GlobalMiddleware2())
+
+// 组中间件
+api := r.Group("/api", GroupMiddleware1())
+api.Use(GroupMiddleware2())
+
+// 路由级中间件
+api.GET("/users", RouteMiddleware1(), RouteMiddleware2(), userHandler)
+```
+
+对于 `/api/users` 请求，执行顺序为：
+1. `GlobalMiddleware1()` - 全局中间件
+2. `GlobalMiddleware2()` - 全局中间件
+3. `GroupMiddleware1()` - 组中间件
+4. `GroupMiddleware2()` - 组中间件
+5. `RouteMiddleware1()` - 路由级中间件
+6. `RouteMiddleware2()` - 路由级中间件
+7. `userHandler` - 最终处理函数
+
+```
+请求进入 → 全局中间件 → 组中间件 → 路由中间件 → 处理函数 → 路由中间件后置逻辑 → 组中间件后置逻辑 → 全局中间件后置逻辑 → 响应
 ```
 
 ## 内置中间件
