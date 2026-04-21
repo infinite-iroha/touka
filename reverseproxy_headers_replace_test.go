@@ -193,15 +193,41 @@ func TestReverseProxyHeaderOpsReplaceResponse(t *testing.T) {
 }
 
 func TestReverseProxyHeaderOpsProvisionInvalidRegexp(t *testing.T) {
-	_ = New()
-	ReverseProxy(ReverseProxyConfig{
-		Target: mustParseURL(t, "http://example.com"),
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+
+	engine := New()
+	engine.GET("/test", ReverseProxy(ReverseProxyConfig{
+		Target: target,
 		RequestHeaders: &HeaderOps{
 			Replace: map[string][]Replacement{
 				"X-Test": {{SearchRegexp: "[invalid"}},
 			},
 		},
-	})
+	}))
+
+	proxy := httptest.NewServer(engine)
+	defer proxy.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/test", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", resp.StatusCode)
+	}
 }
 
 func TestReplacementApply(t *testing.T) {

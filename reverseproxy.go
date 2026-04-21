@@ -136,39 +136,64 @@ func (ops *HeaderOps) applyTo(hdr http.Header, repl *reverseProxyReplacer) {
 		}
 	}
 	
+	var deleteAll bool
+	var exactDeletes []string
+	var suffixPatterns, prefixPatterns, containsPatterns []string
+
 	for _, fieldName := range ops.Delete {
 		fieldName = strings.ToLower(repl.Replace(fieldName))
 		if fieldName == "*" {
-			for k := range hdr {
-				hdr.Del(k)
-			}
-			continue
+			deleteAll = true
+			break
 		}
-		
 		switch {
 		case strings.HasPrefix(fieldName, "*") && strings.HasSuffix(fieldName, "*"):
-			pattern := fieldName[1:len(fieldName)-1]
-			for k := range hdr {
-				if strings.Contains(strings.ToLower(k), pattern) {
-					hdr.Del(k)
-				}
-			}
+			containsPatterns = append(containsPatterns, fieldName[1:len(fieldName)-1])
 		case strings.HasPrefix(fieldName, "*"):
-			suffix := fieldName[1:]
-			for k := range hdr {
-				if strings.HasSuffix(strings.ToLower(k), suffix) {
-					hdr.Del(k)
-				}
-			}
+			suffixPatterns = append(suffixPatterns, fieldName[1:])
 		case strings.HasSuffix(fieldName, "*"):
-			prefix := fieldName[:len(fieldName)-1]
-			for k := range hdr {
-				if strings.HasPrefix(strings.ToLower(k), prefix) {
-					hdr.Del(k)
+			prefixPatterns = append(prefixPatterns, fieldName[:len(fieldName)-1])
+		default:
+			exactDeletes = append(exactDeletes, fieldName)
+		}
+	}
+
+	if deleteAll {
+		for k := range hdr {
+			hdr.Del(k)
+		}
+	} else if len(exactDeletes) > 0 || len(suffixPatterns) > 0 || len(prefixPatterns) > 0 || len(containsPatterns) > 0 {
+		toDelete := make([]string, 0, len(exactDeletes))
+		for k := range hdr {
+			kl := strings.ToLower(k)
+			for _, d := range exactDeletes {
+				if kl == d {
+					toDelete = append(toDelete, k)
+					goto skip
 				}
 			}
-		default:
-			hdr.Del(fieldName)
+			for _, p := range containsPatterns {
+				if strings.Contains(kl, p) {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+			for _, p := range suffixPatterns {
+				if strings.HasSuffix(kl, p) {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+			for _, p := range prefixPatterns {
+				if strings.HasPrefix(kl, p) {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+		skip:
+		}
+		for _, k := range toDelete {
+			hdr.Del(k)
 		}
 	}
 
