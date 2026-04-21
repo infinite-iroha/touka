@@ -103,67 +103,11 @@ func (ops *HeaderOps) applyToRequest(req *http.Request) {
 	if ops == nil {
 		return
 	}
-	replacer := newReverseProxyReplacer(req)
-	
-	for fieldName, vals := range ops.Add {
-		fieldName = replacer.Replace(fieldName)
-		for _, v := range vals {
-			req.Header.Add(fieldName, replacer.Replace(v))
-		}
-	}
-	
-	for fieldName, vals := range ops.Set {
-		fieldName = replacer.Replace(fieldName)
-		req.Header.Del(fieldName)
-		for _, v := range vals {
-			req.Header.Add(fieldName, replacer.Replace(v))
-		}
-	}
-	
-	for _, fieldName := range ops.Delete {
-		fieldName = strings.ToLower(replacer.Replace(fieldName))
-		if fieldName == "*" {
-			for k := range req.Header {
-				req.Header.Del(k)
-			}
-			continue
-		}
-		
-		switch {
-		case strings.HasPrefix(fieldName, "*") && strings.HasSuffix(fieldName, "*"):
-			pattern := fieldName[1:len(fieldName)-1]
-			for k := range req.Header {
-				if strings.Contains(strings.ToLower(k), pattern) {
-					req.Header.Del(k)
-				}
-			}
-		case strings.HasPrefix(fieldName, "*"):
-			suffix := fieldName[1:]
-			for k := range req.Header {
-				if strings.HasSuffix(strings.ToLower(k), suffix) {
-					req.Header.Del(k)
-				}
-			}
-		case strings.HasSuffix(fieldName, "*"):
-			prefix := fieldName[:len(fieldName)-1]
-			for k := range req.Header {
-				if strings.HasPrefix(strings.ToLower(k), prefix) {
-					req.Header.Del(k)
-				}
-			}
-		default:
-			req.Header.Del(fieldName)
-		}
-	}
-
-	ops.applyReplace(req.Header, replacer)
+	ops.applyTo(req.Header, newReverseProxyReplacer(req))
 }
 
 func (ops *RespHeaderOps) applyToResponse(hdr http.Header) {
 	if ops == nil {
-		return
-	}
-	if ops.Deferred {
 		return
 	}
 	ops.applyTo(hdr, newReverseProxyReplacerFromHeader(hdr))
@@ -1065,14 +1009,20 @@ func (p *reverseProxyHandler) modifyResponse(c *Context, res *http.Response, req
 	if p.config.ResponseHeaders != nil && !p.config.ResponseHeaders.Deferred {
 		p.config.ResponseHeaders.applyToResponse(res.Header)
 	}
-	
+
 	if p.config.ModifyResponse == nil {
+		if p.config.ResponseHeaders != nil && p.config.ResponseHeaders.Deferred {
+			p.config.ResponseHeaders.applyToResponse(res.Header)
+		}
 		return true
 	}
 	if err := p.config.ModifyResponse(res); err != nil {
 		res.Body.Close()
 		p.handleError(c, err)
 		return false
+	}
+	if p.config.ResponseHeaders != nil && p.config.ResponseHeaders.Deferred {
+		p.config.ResponseHeaders.applyToResponse(res.Header)
 	}
 	return true
 }
@@ -1272,9 +1222,7 @@ func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, r
 	responseHeader := c.Writer.Header()
 	reverseProxyCopyHeader(responseHeader, res.Header)
 	removeHopByHopHeaders(responseHeader)
-	if res.Header.Get("Sec-WebSocket-Accept") != "" {
-		responseHeader.Del("Sec-WebSocket-Accept")
-	}
+	responseHeader.Del("Sec-WebSocket-Accept")
 	c.Writer.WriteHeader(http.StatusOK)
 	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		backConn.Close()
