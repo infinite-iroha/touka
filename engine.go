@@ -52,7 +52,13 @@ type Engine struct {
 
 	HTTPClient *httpc.Client // 用于在此上下文中执行出站 HTTP 请求
 
+	// LogReco 保留的 reco.Logger 字段
+	// Deprecated: 使用 SetLogger/GetLogger 替代
 	LogReco *reco.Logger
+
+	// logger 是新的日志接口,支持任意 Logger 实现
+	// 优先级: logger > LogReco
+	logger Logger
 
 	HTMLRender any // 用于 HTML 模板渲染,可以设置为 *template.Template 或自定义渲染器接口
 
@@ -367,14 +373,27 @@ func (engine *Engine) SetHandleMethodNotAllowed(enable bool) {
 	engine.rebuildFallbackChains()
 }
 
-// SetLogger传入实例
-func (engine *Engine) SetLogger(logger *reco.Logger) {
-	engine.LogReco = logger
+// SetLogger 传入 Logger 接口实例
+func (engine *Engine) SetLogger(logger Logger) {
+	engine.logger = logger
+	// 同步更新 LogReco 以保持向后兼容
+	if rl, ok := logger.(*reco.Logger); ok {
+		engine.LogReco = rl
+	} else {
+		engine.LogReco = nil
+	}
 }
 
-// 配置日志LoggerCfg
+// GetLogger 返回 Logger 接口实例
+func (engine *Engine) GetLogger() Logger {
+	return engine.logger
+}
+
+// SetLoggerCfg 使用 reco.Config 配置日志
 func (engine *Engine) SetLoggerCfg(logcfg reco.Config) {
-	engine.LogReco = NewLogger(logcfg)
+	logger := NewLogger(logcfg)
+	engine.logger = logger
+	engine.LogReco = logger
 }
 
 // 设置自定义错误处理
