@@ -39,7 +39,16 @@ func CloseLogger(logger *reco.Logger) {
 	}
 }
 
+// CloseLogger 关闭 Engine 的日志实现
+// 如果 logger 实现了 CloserLogger 接口，会调用其 Close 方法
 func (engine *Engine) CloseLogger() {
+	if cl, ok := engine.logger.(CloserLogger); ok {
+		if err := cl.Close(); err != nil {
+			log.Printf("Close Logger Error: %s", err)
+		}
+		return
+	}
+	// 兼容旧代码
 	if engine.LogReco != nil {
 		CloseLogger(engine.LogReco)
 	}
