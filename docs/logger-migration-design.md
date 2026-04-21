@@ -21,7 +21,7 @@ Context.Debugf/Infof... → 硬编码 c.engine.LogReco.Debugf(...)
 
 ```
 Engine.logger           → Logger 接口 (私有)
-Engine.logReco          → *reco.Logger (私有, 兼容层)
+Engine.LogReco          → *reco.Logger (公开, Deprecated - 保持向后兼容)
 Engine.GetLogger()      → 返回 Logger 接口
 Engine.SetLogger(Logger)→ 设置日志实现
 Context.GetLogger()     → 返回 Logger 接口
