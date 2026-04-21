@@ -869,7 +869,7 @@ func (c *Context) GetErrors() []error {
 //
 // Deprecated: 使用 HTTPC() 替代，新方法会自动关联请求 Context
 func (c *Context) Client() *httpc.Client {
-	return c.HTTPClient
+	return c.engine.HTTPClient
 }
 
 // HTTPC 返回自动关联请求 Context 的 HTTP 客户端
