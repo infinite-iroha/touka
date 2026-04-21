@@ -264,11 +264,32 @@ func (ops *HeaderOps) Provision() error {
 }
 
 type reverseProxyReplacer struct {
-	req *http.Request
+	req    *http.Request
+	repl   *strings.Replacer
 }
 
 func newReverseProxyReplacer(req *http.Request) *reverseProxyReplacer {
-	return &reverseProxyReplacer{req: req}
+	r := &reverseProxyReplacer{req: req}
+	if req != nil {
+		uri := req.RequestURI
+		if uri == "" {
+			uri = req.URL.RequestURI()
+		}
+		scheme := "http"
+		if req.TLS != nil {
+			scheme = "https"
+		}
+		r.repl = strings.NewReplacer(
+			"{method}", req.Method,
+			"{host}", req.Host,
+			"{path}", req.URL.Path,
+			"{query}", req.URL.RawQuery,
+			"{scheme}", scheme,
+			"{uri}", uri,
+			"{proto}", req.Proto,
+		)
+	}
+	return r
 }
 
 func newReverseProxyReplacerFromHeader(hdr http.Header) *reverseProxyReplacer {
@@ -279,7 +300,10 @@ func (r *reverseProxyReplacer) Replace(s string) string {
 	if r == nil || s == "" {
 		return s
 	}
-	return s
+	if r.repl == nil {
+		return s
+	}
+	return r.repl.Replace(s)
 }
 
 type reverseProxyHandler struct {
