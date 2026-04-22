@@ -20,6 +20,9 @@ type mergedContext struct {
 	cancelCtx context.Context
 	// deadlineCtx 仅在有 deadline 时非 nil, 用于检测 deadline 到期.
 	deadlineCtx context.Context
+	// done 缓存 Done() 的 channel, 避免重复创建 orDone goroutine.
+	done     <-chan struct{}
+	doneOnce sync.Once
 }
 
 // MergeCtx 创建并返回一个新的 context.Context.
@@ -135,7 +138,10 @@ func (mc *mergedContext) Deadline() (deadline time.Time, ok bool) {
 // Done 实现了 context.Context 的 Done 方法.
 func (mc *mergedContext) Done() <-chan struct{} {
 	if mc.deadlineCtx != nil {
-		return orDone(mc.cancelCtx, mc.deadlineCtx)
+		mc.doneOnce.Do(func() {
+			mc.done = orDone(mc.cancelCtx, mc.deadlineCtx)
+		})
+		return mc.done
 	}
 	return mc.cancelCtx.Done()
 }
