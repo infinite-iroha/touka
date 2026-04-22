@@ -864,10 +864,29 @@ func (c *Context) GetErrors() []error {
 	return c.Errors
 }
 
-// Client 返回 Engine 提供的 HTTPClient
-// 方便在请求处理函数中进行出站 HTTP 请求
+// Client 返回当前请求的 HTTPClient
+// 如果请求处理函数或中间件设置了自定义 HTTPClient，返回该实例；
+// 否则返回 Engine 提供的默认实例
+//
+// Deprecated: 使用 HTTPC() 替代，新方法会自动关联请求 Context
 func (c *Context) Client() *httpc.Client {
-	return c.HTTPClient
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	return c.engine.HTTPClient
+}
+
+// HTTPC 返回自动关联请求 Context 的 HTTP 客户端
+// 当请求被取消时，通过此客户端发起的出站请求也会自动取消
+func (c *Context) HTTPC() *contextHTTPClient {
+	client := c.HTTPClient
+	if client == nil {
+		client = c.engine.HTTPClient
+	}
+	return &contextHTTPClient{
+		client: client,
+		ctx:    c.ctx,
+	}
 }
 
 // Context() 返回请求的上下文，用于取消操作
@@ -1128,11 +1147,6 @@ func (c *Context) ErrorUseHandle(code int, err error) {
 // GetProtocol 获取当前连接版本
 func (c *Context) GetProtocol() string {
 	return c.Request.Proto
-}
-
-// GetHTTPC 获取框架自带传递的httpc
-func (c *Context) GetHTTPC() *httpc.Client {
-	return c.HTTPClient
 }
 
 // GetLogger 获取engine的Logger接口

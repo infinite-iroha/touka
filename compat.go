@@ -4,7 +4,12 @@
 // All rights reserved by WJQSERVER, related rights can be exercised by the infinite-iroha organization.
 package touka
 
-import "github.com/fenthope/reco"
+import (
+	"github.com/WJQSERVER-STUDIO/httpc"
+	"github.com/fenthope/reco"
+)
+
+// --- reco 兼容函数 ---
 
 // GetLogReco 返回底层的 reco.Logger 实例
 // 用于需要访问 reco 特定功能的场景
@@ -34,4 +39,14 @@ func (c *Context) GetLoggerReco() *reco.Logger {
 		return rl
 	}
 	return c.engine.LogReco
+}
+
+// --- httpc 兼容函数 ---
+
+// GetHTTPC 返回底层的 httpc.Client 实例
+// Deprecated: 使用 HTTPC() 替代，新方法会自动关联请求 Context
+//
+//go:fix inline
+func (c *Context) GetHTTPC() *httpc.Client {
+	return c.Client()
 }
