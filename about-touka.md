@@ -70,13 +70,13 @@ func main() {
     r.SetGlobalMaxRequestBodySize(10 * 1024 * 1024) // 10 MB
 
     // ... 其他配置
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 ```
 
 #### 1.3. 服务器生命周期管理
 
-Touka 提供了对底层 `*http.Server` 的完全控制，并内置了优雅关闭的逻辑。
+Touka 提供了对底层 `*http.Server` 的完全控制，并可通过 `Run(...)` 的启动选项启用优雅关闭逻辑。
 
 ```go
 func main() {
@@ -90,11 +90,11 @@ func main() {
         fmt.Println("自定义的 HTTP 服务器配置已应用")
     })
 
-    // 启动服务器，并支持优雅关闭
-    // RunShutdown 会阻塞，直到收到 SIGINT 或 SIGTERM 信号
-    // 第二个参数是优雅关闭的超时时间
+    // 启动服务器，并通过 Run 选项启用优雅关闭
+    // Run(...) 会阻塞当前 goroutine
+    // WithGracefulShutdown(10*time.Second) 表示在关闭时最多等待 10 秒
     fmt.Println("服务器启动于 :8080")
-    if err := r.RunShutdown(":8080", 10*time.Second); err != nil {
+    if err := r.Run(touka.WithAddr(":8080"), touka.WithGracefulShutdown(10*time.Second)); err != nil {
         log.Fatalf("服务器启动失败: %v", err)
     }
 }
@@ -187,7 +187,7 @@ func main() {
         }
     }
 
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 
 func AuthMiddleware() touka.HandlerFunc {
@@ -313,7 +313,7 @@ func main() {
         })
     })
 
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 
 // templates/index.html
@@ -400,7 +400,7 @@ func main() {
         c.JSON(http.StatusOK, touka.H{"status": "ok", "request_id": requestID})
     })
 
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 ```
 
@@ -483,7 +483,7 @@ func main() {
     // 静态文件服务，如果文件不存在，也会被上面的 ErrorHandler 捕获
     r.StaticDir("/files", "./non-existent-dir")
 
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 ```
 
@@ -546,7 +546,7 @@ func main() {
     // 所有对 / 的访问都会映射到嵌入的 frontend/dist 目录
     r.StaticFS("/", http.FS(subFS))
 
-    r.Run(":8080")
+    r.Run(touka.WithAddr(":8080"))
 }
 ```
 

@@ -6,6 +6,8 @@ package touka
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -14,14 +16,18 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/http/httputil"
 	"net/netip"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // ForwardedHeadersPolicy controls how forwarding headers are generated.
@@ -44,37 +50,327 @@ type BufferPool interface {
 // ReverseProxyConfig configures the reverse proxy handler.
 type ReverseProxyConfig struct {
 	Target *url.URL
+	Targets []string
 
-	Transport     http.RoundTripper
+	LoadBalancing ReverseProxyLoadBalancingConfig
+	PassiveHealth ReverseProxyPassiveHealthConfig
+
+	Transport http.RoundTripper
 	FlushInterval time.Duration
-	BufferPool    BufferPool
+	BufferPool BufferPool
+	AllowH2CUpstream bool
 
-	ModifyRequest  func(*http.Request)
+	ModifyRequest func(*http.Request)
 	ModifyResponse func(*http.Response) error
-	ErrorHandler   func(http.ResponseWriter, *http.Request, error)
+	ErrorHandler func(http.ResponseWriter, *http.Request, error)
 
 	ForwardedHeaders ForwardedHeadersPolicy
-	ForwardedBy      string
-	Via              string
-	PreserveHost     bool
+	ForwardedBy string
+	Via string
+	PreserveHost bool
+
+	RequestHeaders *HeaderOps
+	ResponseHeaders *RespHeaderOps
 }
 
 var (
-	errReverseProxyNilTarget     = errors.New("reverse proxy target is nil")
+	errReverseProxyNilTarget = errors.New("reverse proxy target is nil")
 	errReverseProxyInvalidTarget = errors.New("reverse proxy target must include scheme and host")
-	errReverseProxyCopyDone      = errors.New("reverse proxy switch protocol copy complete")
+	errReverseProxyCopyDone = errors.New("reverse proxy switch protocol copy complete")
+	errReverseProxyNoAvailableUpstreams = errors.New("reverse proxy has no available upstreams")
 )
+
+type HeaderOps struct {
+	Add     map[string][]string
+	Set     map[string][]string
+	Delete  []string
+	Replace map[string][]Replacement
+}
+
+type Replacement struct {
+	Search       string
+	Replace      string
+	SearchRegexp string
+	re           *regexp.Regexp
+}
+
+type RespHeaderOps struct {
+	*HeaderOps
+	Deferred bool
+}
+
+func (ops *HeaderOps) applyToRequest(req *http.Request) {
+	if ops == nil {
+		return
+	}
+	ops.applyTo(req.Header, newReverseProxyReplacer(req))
+}
+
+func (ops *RespHeaderOps) applyToResponse(hdr http.Header) {
+	if ops == nil {
+		return
+	}
+	ops.applyTo(hdr, newReverseProxyReplacerFromHeader(hdr))
+}
+
+func (ops *HeaderOps) applyTo(hdr http.Header, repl *reverseProxyReplacer) {
+	if ops == nil {
+		return
+	}
+	if repl == nil {
+		repl = &reverseProxyReplacer{}
+	}
+	
+	for fieldName, vals := range ops.Add {
+		fieldName = repl.Replace(fieldName)
+		for _, v := range vals {
+			hdr.Add(fieldName, repl.Replace(v))
+		}
+	}
+	
+	for fieldName, vals := range ops.Set {
+		fieldName = repl.Replace(fieldName)
+		hdr.Del(fieldName)
+		for _, v := range vals {
+			hdr.Add(fieldName, repl.Replace(v))
+		}
+	}
+	
+	var deleteAll bool
+	var exactDeletes []string
+	var suffixPatterns, prefixPatterns, containsPatterns []string
+
+	for _, fieldName := range ops.Delete {
+		fieldName = strings.ToLower(repl.Replace(fieldName))
+		if fieldName == "*" {
+			deleteAll = true
+			break
+		}
+		switch {
+		case strings.HasPrefix(fieldName, "*") && strings.HasSuffix(fieldName, "*"):
+			containsPatterns = append(containsPatterns, fieldName[1:len(fieldName)-1])
+		case strings.HasPrefix(fieldName, "*"):
+			suffixPatterns = append(suffixPatterns, fieldName[1:])
+		case strings.HasSuffix(fieldName, "*"):
+			prefixPatterns = append(prefixPatterns, fieldName[:len(fieldName)-1])
+		default:
+			exactDeletes = append(exactDeletes, fieldName)
+		}
+	}
+
+	if deleteAll {
+		for k := range hdr {
+			hdr.Del(k)
+		}
+	} else if len(exactDeletes) > 0 || len(suffixPatterns) > 0 || len(prefixPatterns) > 0 || len(containsPatterns) > 0 {
+		toDelete := make([]string, 0, len(exactDeletes))
+		for k := range hdr {
+			kl := strings.ToLower(k)
+			for _, d := range exactDeletes {
+				if kl == d {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+			for _, p := range containsPatterns {
+				if strings.Contains(kl, p) {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+			for _, p := range suffixPatterns {
+				if strings.HasSuffix(kl, p) {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+			for _, p := range prefixPatterns {
+				if strings.HasPrefix(kl, p) {
+					toDelete = append(toDelete, k)
+					goto skip
+				}
+			}
+		skip:
+		}
+		for _, k := range toDelete {
+			hdr.Del(k)
+		}
+	}
+
+	ops.applyReplace(hdr, repl)
+}
+
+func (ops *HeaderOps) applyReplace(hdr http.Header, repl *reverseProxyReplacer) {
+	if ops == nil || len(ops.Replace) == 0 {
+		return
+	}
+	for fieldName, replacements := range ops.Replace {
+		fieldName = http.CanonicalHeaderKey(repl.Replace(fieldName))
+		if fieldName == "*" {
+			for fn, vals := range hdr {
+				for i := range vals {
+					for _, r := range replacements {
+						hdr[fn][i] = r.apply(vals[i])
+					}
+				}
+			}
+			continue
+		}
+		vals, ok := hdr[fieldName]
+		if !ok {
+			continue
+		}
+		for i := range vals {
+			for _, r := range replacements {
+				hdr[fieldName][i] = r.apply(vals[i])
+			}
+		}
+	}
+}
+
+func (r *Replacement) apply(s string) string {
+	if r == nil || s == "" {
+		return s
+	}
+	if r.SearchRegexp != "" && r.re != nil {
+		return r.re.ReplaceAllString(s, r.Replace)
+	}
+	if r.Search != "" {
+		return strings.ReplaceAll(s, r.Search, r.Replace)
+	}
+	return s
+}
+
+func (ops *HeaderOps) Provision() error {
+	if ops == nil {
+		return nil
+	}
+	for fieldName, replacements := range ops.Replace {
+		for i, r := range replacements {
+			if r.SearchRegexp == "" {
+				continue
+			}
+			if r.Search != "" {
+				return fmt.Errorf("replacement %d for header field %q: cannot specify both Search and SearchRegexp", i, fieldName)
+			}
+			re, err := regexp.Compile(r.SearchRegexp)
+			if err != nil {
+				return fmt.Errorf("replacement %d for header field %q: %v", i, fieldName, err)
+			}
+			replacements[i].re = re
+		}
+	}
+	return nil
+}
+
+type reverseProxyReplacer struct {
+	method, host, path, query, scheme, uri, proto string
+}
+
+func newReverseProxyReplacer(req *http.Request) *reverseProxyReplacer {
+	if req == nil || req.URL == nil {
+		return &reverseProxyReplacer{}
+	}
+	uri := req.RequestURI
+	if uri == "" {
+		uri = req.URL.RequestURI()
+	}
+	return &reverseProxyReplacer{
+		method: req.Method,
+		host:   req.Host,
+		path:   req.URL.EscapedPath(),
+		query:  req.URL.RawQuery,
+		scheme: reverseProxyRequestScheme(req),
+		uri:    uri,
+		proto:  req.Proto,
+	}
+}
+
+func newReverseProxyReplacerFromHeader(hdr http.Header) *reverseProxyReplacer {
+	return &reverseProxyReplacer{}
+}
+
+func (r *reverseProxyReplacer) Replace(s string) string {
+	if r == nil || s == "" {
+		return s
+	}
+	if r.method != "" {
+		s = strings.ReplaceAll(s, "{method}", r.method)
+	}
+	if r.host != "" {
+		s = strings.ReplaceAll(s, "{host}", r.host)
+	}
+	if r.path != "" {
+		s = strings.ReplaceAll(s, "{path}", r.path)
+	}
+	if r.query != "" {
+		s = strings.ReplaceAll(s, "{query}", r.query)
+	}
+	if r.scheme != "" {
+		s = strings.ReplaceAll(s, "{scheme}", r.scheme)
+	}
+	if r.uri != "" {
+		s = strings.ReplaceAll(s, "{uri}", r.uri)
+	}
+	if r.proto != "" {
+		s = strings.ReplaceAll(s, "{proto}", r.proto)
+	}
+	return s
+}
 
 type reverseProxyHandler struct {
 	config      ReverseProxyConfig
-	target      *url.URL
+	upstreams   []*reverseProxyUpstream
 	receivedBy  string
 	configError error
+	roundRobin  atomic.Uint64
+}
+
+var reverseProxyCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
+var reverseProxyCandidatePool = sync.Pool{
+	New: func() any {
+		s := make([]*reverseProxyUpstream, 0, 8)
+		return &s
+	},
 }
 
 type reverseProxyStatusError struct {
 	status int
 	err    error
+}
+
+type reverseProxyExtendedConnectBridge struct {
+	body io.ReadCloser
+}
+
+type reverseProxyH2ReadWriteCloser struct {
+	io.ReadCloser
+	ResponseWriter
+	controller *http.ResponseController
+}
+
+func (rwc *reverseProxyH2ReadWriteCloser) Write(p []byte) (int, error) {
+	n, err := rwc.ResponseWriter.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if err := rwc.controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return n, err
+	}
+	return n, nil
+}
+
+func (rwc *reverseProxyH2ReadWriteCloser) Close() error {
+	if rwc.ReadCloser == nil {
+		return nil
+	}
+	return rwc.ReadCloser.Close()
 }
 
 func (e *reverseProxyStatusError) Error() string {
@@ -197,25 +493,46 @@ func ReverseProxy(config ReverseProxyConfig) HandlerFunc {
 }
 
 func newReverseProxyHandler(config ReverseProxyConfig) *reverseProxyHandler {
-	target := cloneReverseProxyURL(config.Target)
-	if target != nil {
-		normalizeReverseProxyTarget(target)
-	}
-
 	proxy := &reverseProxyHandler{
 		config:     config,
-		target:     target,
 		receivedBy: reverseProxyReceivedBy(config.Via),
 	}
 
-	if err := validateReverseProxyTarget(target); err != nil {
+	if config.RequestHeaders != nil {
+		if err := config.RequestHeaders.Provision(); err != nil {
+			proxy.configError = err
+			return proxy
+		}
+	}
+	if config.ResponseHeaders != nil && config.ResponseHeaders.HeaderOps != nil {
+		if err := config.ResponseHeaders.HeaderOps.Provision(); err != nil {
+			proxy.configError = err
+			return proxy
+		}
+	}
+
+	upstreams, err := buildReverseProxyUpstreams(config)
+	if err != nil {
 		proxy.configError = err
+	} else {
+		proxy.upstreams = upstreams
 	}
 
 	switch config.ForwardedHeaders {
 	case ForwardedBoth, ForwardedNone, ForwardedXForwardedOnly, ForwardedRFC7239Only:
 	default:
 		proxy.config.ForwardedHeaders = ForwardedBoth
+	}
+	proxy.config.ForwardedBy = strings.TrimSpace(proxy.config.ForwardedBy)
+	if reverseProxyUsesForwardedHeader(proxy.config.ForwardedHeaders) {
+		if err := validateReverseProxyForwardedBy(proxy.config.ForwardedBy); err != nil {
+			proxy.configError = err
+		}
+	}
+	if proxy.configError == nil {
+		if err := validateReverseProxyLBPolicy(proxy.config.LoadBalancing.Policy); err != nil {
+			proxy.configError = err
+		}
 	}
 
 	return proxy
@@ -229,62 +546,75 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 		return
 	}
 
-	transport := p.config.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
+	updatedMaxForwards, handledLocally, err := p.handleMaxForwards(c)
+	if err != nil {
+		p.handleError(c, err)
+		return
+	}
+	if handledLocally {
+		return
 	}
 
 	ctx, cancel := p.requestContext(c)
 	defer cancel()
+	attempted := make(map[string]struct{}, len(p.upstreams))
+	attempts := 0
+	started := time.Now()
+	var lastErr error
 
-	outreq := c.Request.Clone(ctx)
-	if c.Request.ContentLength == 0 {
-		outreq.Body = nil
-	}
-	if outreq.Body != nil {
-		outreq.Body = &noopCloseReader{readCloser: outreq.Body}
-		defer outreq.Body.Close()
-	}
-	if outreq.Header == nil {
-		outreq.Header = make(http.Header)
-	}
-	outreq.Close = false
+	for {
+		upstream, err := p.selectUpstream(c, attempted)
+		if err != nil {
+			if lastErr != nil {
+				p.handleError(c, lastErr)
+				return
+			}
+			p.handleError(c, &reverseProxyStatusError{status: http.StatusBadGateway, err: err})
+			return
+		}
 
-	rewriteReverseProxyURL(outreq, p.target)
-	if !p.config.PreserveHost {
-		outreq.Host = ""
-	}
-	outreq.URL.RawQuery = cleanReverseProxyQueryParams(outreq.URL.RawQuery)
+		attempts++
+		upstream.inFlight.Add(1)
+		served, attemptErr, retriable := p.serveUpstreamAttempt(c, ctx, upstream, updatedMaxForwards)
+		upstream.inFlight.Add(-1)
 
-	reqUpType := reverseProxyUpgradeType(outreq.Header)
-	if reqUpType != "" && !isPrintableASCII(reqUpType) {
-		p.handleError(c, &reverseProxyStatusError{
-			status: http.StatusBadRequest,
-			err:    fmt.Errorf("client tried to switch to invalid protocol %q", reqUpType),
-		})
+		if served {
+			return
+		}
+		if attemptErr != nil {
+			lastErr = attemptErr
+		}
+		if retriable && p.shouldRetryAttempt(c.Request, attempts, started) {
+			attempted[upstream.key] = struct{}{}
+			if !p.waitRetryInterval(ctx, started) {
+				if lastErr != nil {
+					p.handleError(c, lastErr)
+				}
+				return
+			}
+			continue
+		}
+		if attemptErr != nil {
+			p.handleError(c, attemptErr)
+			return
+		}
+		if lastErr != nil {
+			p.handleError(c, lastErr)
+			return
+		}
+		p.handleError(c, &reverseProxyStatusError{status: http.StatusBadGateway, err: errReverseProxyNoAvailableUpstreams})
 		return
 	}
+}
 
-	removeHopByHopHeaders(outreq.Header)
-	if headerValuesContainToken(c.Request.Header["Te"], "trailers") {
-		outreq.Header.Set("Te", "trailers")
+func (p *reverseProxyHandler) serveUpstreamAttempt(c *Context, ctx context.Context, upstream *reverseProxyUpstream, updatedMaxForwards string) (bool, error, bool) {
+	outreq, connectWriter, cleanup, err := p.buildOutgoingRequest(c, ctx, upstream, updatedMaxForwards)
+	if err != nil {
+		return false, err, false
 	}
-	if reqUpType != "" {
-		outreq.Header.Set("Connection", "Upgrade")
-		outreq.Header.Set("Upgrade", reqUpType)
-	}
+	defer cleanup()
 
-	p.addForwardingHeaders(c.Request, outreq)
-	appendViaHeader(outreq.Header, reverseProxyViaProtocol(c.Request.ProtoMajor, c.Request.ProtoMinor, c.Request.Proto), p.receivedBy)
-
-	if _, ok := outreq.Header["User-Agent"]; !ok {
-		outreq.Header.Set("User-Agent", "")
-	}
-
-	if p.config.ModifyRequest != nil {
-		p.config.ModifyRequest(outreq)
-	}
-
+	transport := p.transportForUpstream(outreq, upstream)
 	rawWriter := reverseProxyBaseResponseWriter(c.Writer)
 	var (
 		roundTripMu   sync.Mutex
@@ -314,26 +644,65 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 	roundTripDone = true
 	roundTripMu.Unlock()
 	if err != nil {
-		p.handleError(c, err)
-		return
+		if reverseProxyShouldCountPassiveFailure(outreq, err) {
+			upstream.recordFailure(time.Now(), p.config.PassiveHealth)
+		}
+		return false, err, true
+	}
+	if reverseProxyStatusIsUnhealthy(p.config.PassiveHealth, res.StatusCode) {
+		upstream.recordFailure(time.Now(), p.config.PassiveHealth)
+	}
+
+	if bridge := reverseProxyExtendedConnectBridgeFromContext(outreq.Context()); bridge != nil {
+		if res.StatusCode == http.StatusSwitchingProtocols {
+			appendViaHeader(res.Header, reverseProxyViaProtocol(res.ProtoMajor, res.ProtoMinor, res.Proto), p.receivedBy)
+			if !p.modifyResponse(c, res, outreq) {
+				return true, nil, false
+			}
+			if err := p.handleBridgedExtendedConnectResponse(c, outreq, res, bridge); err != nil {
+				return false, err, false
+			}
+			return true, nil, false
+		}
+		return false, &reverseProxyStatusError{status: http.StatusBadGateway, err: fmt.Errorf("extended CONNECT backend returned status %d instead of 101", res.StatusCode)}, false
+	}
+
+	if outreq.Method == http.MethodConnect && res.StatusCode >= http.StatusOK && res.StatusCode < http.StatusMultipleChoices {
+		removeHopByHopHeaders(res.Header)
+		res.Header.Del("Content-Length")
+		res.Header.Del("Transfer-Encoding")
+		res.ContentLength = -1
+		res.TransferEncoding = nil
+		appendViaHeader(res.Header, reverseProxyViaProtocol(res.ProtoMajor, res.ProtoMinor, res.Proto), p.receivedBy)
+		if !p.modifyResponse(c, res, outreq) {
+			return true, nil, false
+		}
+		handleConnect := p.handleConnectResponse
+		if reverseProxyIsExtendedConnectRequest(outreq) {
+			handleConnect = p.handleExtendedConnectResponse
+		}
+		if err := handleConnect(c, outreq, res, connectWriter); err != nil {
+			return false, err, false
+		}
+		return true, nil, false
 	}
 
 	if res.StatusCode == http.StatusSwitchingProtocols {
 		appendViaHeader(res.Header, reverseProxyViaProtocol(res.ProtoMajor, res.ProtoMinor, res.Proto), p.receivedBy)
 		if !p.modifyResponse(c, res, outreq) {
-			return
+			return true, nil, false
 		}
 		if err := p.handleUpgradeResponse(c, outreq, res); err != nil {
-			p.handleError(c, err)
+			return false, err, false
 		}
-		return
+		return true, nil, false
 	}
 
 	removeHopByHopHeaders(res.Header)
 	appendViaHeader(res.Header, reverseProxyViaProtocol(res.ProtoMajor, res.ProtoMinor, res.Proto), p.receivedBy)
 
 	if !p.modifyResponse(c, res, outreq) {
-		return
+		return true, nil, false
 	}
 
 	reverseProxyCopyHeader(c.Writer.Header(), res.Header)
@@ -353,7 +722,10 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 		defer res.Body.Close()
 		c.AddError(fmt.Errorf("reverse proxy body copy failed: %w", err))
 		p.logf(c, "reverse proxy body copy failed: %v", err)
-		return
+		if reverseProxyShouldPanicOnCopyError(c.Request) {
+			panic(http.ErrAbortHandler)
+		}
+		return true, nil, false
 	}
 	res.Body.Close()
 
@@ -361,13 +733,9 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 		c.Writer.Flush()
 	}
 
-	// Keep the stdlib-compatible fallback here.
-	// If the backend only exposes additional trailer keys after the body has been
-	// fully read, the trailer map can grow and those values must be written using
-	// the TrailerPrefix form instead of the pre-announced bare header keys.
 	if len(res.Trailer) == announcedTrailers {
 		reverseProxyCopyHeader(c.Writer.Header(), res.Trailer)
-		return
+		return true, nil, false
 	}
 
 	for key, values := range res.Trailer {
@@ -376,6 +744,249 @@ func (p *reverseProxyHandler) ServeHTTP(c *Context) {
 			c.Writer.Header().Add(prefixedKey, value)
 		}
 	}
+	return true, nil, false
+}
+
+func (p *reverseProxyHandler) buildOutgoingRequest(c *Context, ctx context.Context, upstream *reverseProxyUpstream, updatedMaxForwards string) (*http.Request, *io.PipeWriter, func(), error) {
+	outreq := c.Request.Clone(ctx)
+	bridgeCtx, bridged, err := reverseProxyPrepareExtendedConnectBridge(outreq)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if bridged {
+		outreq = outreq.WithContext(bridgeCtx)
+	}
+	if outreq.Method == http.MethodConnect || c.Request.ContentLength == 0 {
+		outreq.Body = nil
+	} else if c.Request.GetBody != nil {
+		body, err := c.Request.GetBody()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("reverse proxy failed to replay request body: %w", err)
+		}
+		outreq.Body = body
+	} else if outreq.Body != nil {
+		outreq.Body = &noopCloseReader{readCloser: outreq.Body}
+	}
+	if outreq.Header == nil {
+		outreq.Header = make(http.Header)
+	}
+	outreq.Close = false
+	var connectWriter *io.PipeWriter
+	if outreq.Method == http.MethodConnect && !bridged {
+		pipeReader, pipeWriter := io.Pipe()
+		outreq.Body = pipeReader
+		outreq.ContentLength = -1
+		connectWriter = pipeWriter
+	}
+	cleanup := func() {
+		if outreq.Body != nil {
+			_ = outreq.Body.Close()
+		}
+		if connectWriter != nil {
+			_ = connectWriter.Close()
+		}
+	}
+
+	if outreq.Method == http.MethodConnect && !reverseProxyIsExtendedConnectRequest(outreq) {
+		if err := rewriteReverseProxyConnectRequest(outreq, upstream.target); err != nil {
+			cleanup()
+			return nil, nil, nil, err
+		}
+	} else {
+		rewriteReverseProxyURL(outreq, upstream.target)
+		if !p.config.PreserveHost {
+			outreq.Host = ""
+		}
+		outreq.URL.RawQuery = cleanReverseProxyQueryParams(outreq.URL.RawQuery)
+	}
+	if updatedMaxForwards != "" {
+		outreq.Header.Set("Max-Forwards", updatedMaxForwards)
+	}
+
+	reqUpType := reverseProxyUpgradeType(outreq.Header)
+	if reqUpType != "" && !isPrintableASCII(reqUpType) {
+		cleanup()
+		return nil, nil, nil, &reverseProxyStatusError{
+			status: http.StatusBadRequest,
+			err:    fmt.Errorf("client tried to switch to invalid protocol %q", reqUpType),
+		}
+	}
+
+	removeHopByHopHeaders(outreq.Header)
+	if headerValuesContainToken(c.Request.Header["Te"], "trailers") {
+		outreq.Header.Set("Te", "trailers")
+	}
+	if reqUpType != "" {
+		outreq.Header.Set("Connection", "Upgrade")
+		outreq.Header.Set("Upgrade", reqUpType)
+	}
+
+	p.addForwardingHeaders(c.Request, outreq)
+	appendViaHeader(outreq.Header, reverseProxyViaProtocol(c.Request.ProtoMajor, c.Request.ProtoMinor, c.Request.Proto), p.receivedBy)
+
+	if _, ok := outreq.Header["User-Agent"]; !ok {
+		outreq.Header.Set("User-Agent", "")
+	}
+
+	if p.config.RequestHeaders != nil {
+		p.config.RequestHeaders.applyToRequest(outreq)
+	}
+
+	if p.config.ModifyRequest != nil {
+		p.config.ModifyRequest(outreq)
+	}
+
+	return outreq, connectWriter, cleanup, nil
+}
+
+func (p *reverseProxyHandler) transportForUpstream(req *http.Request, upstream *reverseProxyUpstream) http.RoundTripper {
+	if p.config.Transport != nil {
+		return p.config.Transport
+	}
+	if reverseProxyExtendedConnectBridgeFromContext(req.Context()) != nil {
+		if upstream.bridgeTransport != nil {
+			return upstream.bridgeTransport
+		}
+		return http.DefaultTransport
+	}
+	if upstream.useH2C && upstream.h2cTransport != nil {
+		return upstream.h2cTransport
+	}
+	if reverseProxyIsExtendedConnectRequest(req) && upstream.extendedConnectTransport != nil {
+		return upstream.extendedConnectTransport
+	}
+	return http.DefaultTransport
+}
+
+func (p *reverseProxyHandler) shouldRetryAttempt(req *http.Request, attempts int, started time.Time) bool {
+	if req == nil || req.Context().Err() != nil || !reverseProxyCanRetryRequest(req) {
+		return false
+	}
+	lb := p.config.LoadBalancing
+	if lb.TryDuration > 0 {
+		return time.Since(started) < lb.TryDuration
+	}
+	return attempts <= lb.Retries
+}
+
+func (p *reverseProxyHandler) waitRetryInterval(ctx context.Context, started time.Time) bool {
+	interval := p.config.LoadBalancing.TryInterval
+	tryDuration := p.config.LoadBalancing.TryDuration
+	if tryDuration > 0 && interval == 0 {
+		interval = 250 * time.Millisecond
+	}
+	if tryDuration > 0 {
+		remaining := tryDuration - time.Since(started)
+		if remaining <= 0 {
+			return false
+		}
+		if interval <= 0 {
+			return ctx.Err() == nil
+		}
+		if interval > remaining {
+			return false
+		}
+	}
+	if interval <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (p *reverseProxyHandler) handleMaxForwards(c *Context) (string, bool, error) {
+	if c == nil || c.Request == nil {
+		return "", false, nil
+	}
+
+	switch c.Request.Method {
+	case http.MethodOptions, http.MethodTrace:
+	default:
+		return "", false, nil
+	}
+
+	rawValue := textproto.TrimString(c.Request.Header.Get("Max-Forwards"))
+	if rawValue == "" {
+		return "", false, nil
+	}
+
+	value, err := strconv.Atoi(rawValue)
+	if err != nil || value < 0 {
+		return "", false, &reverseProxyStatusError{
+			status: http.StatusBadRequest,
+			err:    fmt.Errorf("invalid Max-Forwards value %q", rawValue),
+		}
+	}
+	if value == 0 {
+		switch c.Request.Method {
+		case http.MethodTrace:
+			return "", true, p.writeLocalTraceResponse(c)
+		case http.MethodOptions:
+			p.writeLocalOptionsResponse(c)
+			return "", true, nil
+		}
+	}
+
+	return strconv.Itoa(value - 1), false, nil
+}
+
+func (p *reverseProxyHandler) writeLocalTraceResponse(c *Context) error {
+	if c == nil || c.Request == nil {
+		return nil
+	}
+
+	traceReq := c.Request.Clone(c.Request.Context())
+	traceReq.Body = nil
+	traceReq.ContentLength = 0
+	traceReq.TransferEncoding = nil
+	traceReq.RequestURI = c.Request.RequestURI
+	if traceReq.RequestURI == "" && traceReq.URL != nil {
+		traceReq.RequestURI = traceReq.URL.RequestURI()
+	}
+	traceReq.Header = traceReq.Header.Clone()
+	for _, key := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Content-Length", "Transfer-Encoding", "Trailer"} {
+		traceReq.Header.Del(key)
+	}
+
+	dump, err := httputil.DumpRequest(traceReq, false)
+	if err != nil {
+		return &reverseProxyStatusError{status: http.StatusInternalServerError, err: err}
+	}
+
+	c.Writer.Header().Set("Content-Type", "message/http")
+	c.Writer.WriteHeader(http.StatusOK)
+	_, err = c.Writer.Write(dump)
+	return err
+}
+
+func (p *reverseProxyHandler) writeLocalOptionsResponse(c *Context) {
+	if c == nil {
+		return
+	}
+
+	if c.engine != nil {
+		if c.Request != nil && c.Request.RequestURI != "*" {
+			if allow := c.engine.allowedMethodsForPath(routeLookupPath(c.Request), c.allowedMethodsBuf[:0]); len(allow) > 0 {
+				c.allowedMethodsBuf = allow[:0]
+				allowHeader := c.allowHeaderBuf[:0]
+				for i, method := range allow {
+					if i > 0 {
+						allowHeader = append(allowHeader, ',', ' ')
+					}
+					allowHeader = append(allowHeader, method...)
+				}
+				c.allowHeaderBuf = allowHeader[:0]
+				c.Writer.Header().Set("Allow", string(allowHeader))
+			}
+		}
+	}
+	c.Writer.WriteHeader(http.StatusOK)
 }
 
 func (p *reverseProxyHandler) requestContext(c *Context) (context.Context, context.CancelFunc) {
@@ -456,13 +1067,23 @@ func appendXForwardedFor(header http.Header, clientIP string) {
 }
 
 func (p *reverseProxyHandler) modifyResponse(c *Context, res *http.Response, req *http.Request) bool {
+	if p.config.ResponseHeaders != nil && !p.config.ResponseHeaders.Deferred {
+		p.config.ResponseHeaders.applyToResponse(res.Header)
+	}
+
 	if p.config.ModifyResponse == nil {
+		if p.config.ResponseHeaders != nil && p.config.ResponseHeaders.Deferred {
+			p.config.ResponseHeaders.applyToResponse(res.Header)
+		}
 		return true
 	}
 	if err := p.config.ModifyResponse(res); err != nil {
 		res.Body.Close()
 		p.handleError(c, err)
 		return false
+	}
+	if p.config.ResponseHeaders != nil && p.config.ResponseHeaders.Deferred {
+		p.config.ResponseHeaders.applyToResponse(res.Header)
 	}
 	return true
 }
@@ -522,7 +1143,11 @@ func (p *reverseProxyHandler) handleUpgradeResponse(c *Context, req *http.Reques
 	clientConn, brw, err := c.Writer.Hijack()
 	if err != nil {
 		backConn.Close()
-		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+		status := http.StatusBadGateway
+		if errors.Is(err, http.ErrNotSupported) {
+			status = http.StatusNotImplemented
+		}
+		return &reverseProxyStatusError{status: status, err: err}
 	}
 
 	defer clientConn.Close()
@@ -561,6 +1186,231 @@ func (p *reverseProxyHandler) handleUpgradeResponse(c *Context, req *http.Reques
 	return firstErr
 }
 
+func (p *reverseProxyHandler) handleConnectResponse(c *Context, req *http.Request, res *http.Response, backWrite *io.PipeWriter) error {
+	if backWrite == nil {
+		res.Body.Close()
+		return &reverseProxyStatusError{
+			status: http.StatusBadGateway,
+			err:    errors.New("reverse proxy CONNECT tunnel is missing backend writer"),
+		}
+	}
+	backRead := res.Body
+
+	clientConn, brw, err := c.Writer.Hijack()
+	if err != nil {
+		backRead.Close()
+		_ = backWrite.Close()
+		status := http.StatusBadGateway
+		if errors.Is(err, http.ErrNotSupported) {
+			status = http.StatusNotImplemented
+		}
+		return &reverseProxyStatusError{status: status, err: err}
+	}
+
+	defer clientConn.Close()
+	defer backRead.Close()
+	defer backWrite.Close()
+
+	backConnClosed := make(chan struct{})
+	go func() {
+		select {
+		case <-req.Context().Done():
+		case <-backConnClosed:
+		}
+		backRead.Close()
+		_ = backWrite.Close()
+	}()
+	defer close(backConnClosed)
+
+	res.Body = nil
+	if err := res.Write(brw); err != nil {
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+	if err := brw.Flush(); err != nil {
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	errc := make(chan error, 2)
+	go func() {
+		if _, err := io.Copy(clientConn, backRead); err != nil {
+			errc <- err
+			return
+		}
+		if cw, ok := clientConn.(interface{ CloseWrite() error }); ok {
+			errc <- cw.CloseWrite()
+			return
+		}
+		errc <- errReverseProxyCopyDone
+	}()
+	go func() {
+		if _, err := io.Copy(backWrite, clientConn); err != nil {
+			errc <- err
+			return
+		}
+		errc <- backWrite.Close()
+	}()
+
+	firstErr := <-errc
+	if firstErr == nil {
+		firstErr = <-errc
+	}
+	if errors.Is(firstErr, errReverseProxyCopyDone) || errors.Is(firstErr, net.ErrClosed) || errors.Is(firstErr, io.EOF) || errors.Is(firstErr, context.Canceled) {
+		return nil
+	}
+	return firstErr
+}
+
+func (p *reverseProxyHandler) handleBridgedExtendedConnectResponse(c *Context, req *http.Request, res *http.Response, bridge *reverseProxyExtendedConnectBridge) error {
+	if c == nil || c.Request == nil {
+		res.Body.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: errors.New("extended CONNECT bridge requires a valid request context")}
+	}
+	backConn, ok := res.Body.(io.ReadWriteCloser)
+	if !ok {
+		res.Body.Close()
+		return &reverseProxyStatusError{
+			status: http.StatusBadGateway,
+			err:    errors.New("backend returned bridged websocket response without writable body"),
+		}
+	}
+
+	controller := http.NewResponseController(reverseProxyBaseResponseWriter(c.Writer))
+	if err := controller.EnableFullDuplex(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		backConn.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	responseHeader := c.Writer.Header()
+	reverseProxyCopyHeader(responseHeader, res.Header)
+	removeHopByHopHeaders(responseHeader)
+	responseHeader.Del("Sec-WebSocket-Accept")
+	c.Writer.WriteHeader(http.StatusOK)
+	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		backConn.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	conn := &reverseProxyH2ReadWriteCloser{ReadCloser: bridge.body, ResponseWriter: c.Writer, controller: controller}
+
+	var closeOnce sync.Once
+	closeTunnel := func() {
+		closeOnce.Do(func() {
+			_ = conn.Close()
+			_ = backConn.Close()
+		})
+	}
+	go func() {
+		<-req.Context().Done()
+		closeTunnel()
+	}()
+
+	errc := make(chan error, 2)
+	copyer := switchProtocolCopier{user: conn, backend: backConn}
+	go copyer.copyToBackend(errc)
+	go copyer.copyFromBackend(errc)
+
+	var firstErr error
+	for range 2 {
+		err := <-errc
+		if reverseProxyIsBenignTunnelError(err) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+			closeTunnel()
+		}
+	}
+	closeTunnel()
+	if reverseProxyIsBenignTunnelError(firstErr) {
+		return nil
+	}
+	return firstErr
+}
+
+func (p *reverseProxyHandler) handleExtendedConnectResponse(c *Context, req *http.Request, res *http.Response, backWrite *io.PipeWriter) error {
+	if c == nil || c.Request == nil {
+		res.Body.Close()
+		if backWrite != nil {
+			_ = backWrite.Close()
+		}
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: errors.New("extended CONNECT requires a valid request context")}
+	}
+	if backWrite == nil {
+		res.Body.Close()
+		return &reverseProxyStatusError{
+			status: http.StatusBadGateway,
+			err:    errors.New("reverse proxy extended CONNECT tunnel is missing backend writer"),
+		}
+	}
+
+	controller := http.NewResponseController(reverseProxyBaseResponseWriter(c.Writer))
+	if err := controller.EnableFullDuplex(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		res.Body.Close()
+		_ = backWrite.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	reverseProxyCopyHeader(c.Writer.Header(), res.Header)
+	c.Writer.WriteHeader(res.StatusCode)
+	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		res.Body.Close()
+		_ = backWrite.Close()
+		return &reverseProxyStatusError{status: http.StatusBadGateway, err: err}
+	}
+
+	var closeOnce sync.Once
+	closeTunnel := func() {
+		closeOnce.Do(func() {
+			_ = c.Request.Body.Close()
+			_ = backWrite.Close()
+			_ = res.Body.Close()
+		})
+	}
+	go func() {
+		<-req.Context().Done()
+		closeTunnel()
+	}()
+
+	errc := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(backWrite, c.Request.Body)
+		closeErr := backWrite.Close()
+		if err != nil && !reverseProxyIsBenignTunnelError(err) {
+			errc <- err
+			return
+		}
+		errc <- closeErr
+	}()
+	go func() {
+		copyErr := p.copyResponse(c.Writer, res.Body, -1)
+		closeErr := res.Body.Close()
+		if copyErr != nil {
+			errc <- copyErr
+			return
+		}
+		errc <- closeErr
+	}()
+
+	var firstErr error
+	for range 2 {
+		err := <-errc
+		if reverseProxyIsBenignTunnelError(err) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+			closeTunnel()
+		}
+	}
+	closeTunnel()
+	if reverseProxyIsBenignTunnelError(firstErr) {
+		return nil
+	}
+
+	return firstErr
+
+}
+
 func (p *reverseProxyHandler) flushInterval(res *http.Response) time.Duration {
 	if baseType, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type")); baseType == "text/event-stream" {
 		return -1
@@ -586,6 +1436,10 @@ func (p *reverseProxyHandler) copyResponse(dst ResponseWriter, src io.Reader, fl
 	if p.config.BufferPool != nil {
 		buf = p.config.BufferPool.Get()
 		defer p.config.BufferPool.Put(buf)
+	} else {
+		bufp := reverseProxyCopyBufferPool.Get().(*[]byte)
+		buf = *bufp
+		defer reverseProxyCopyBufferPool.Put(bufp)
 	}
 	_, err := p.copyBuffer(writer, src, buf)
 	return err
@@ -599,7 +1453,7 @@ func (p *reverseProxyHandler) copyBuffer(dst io.Writer, src io.Reader, buf []byt
 	var written int64
 	for {
 		nr, rerr := src.Read(buf)
-		if rerr != nil && !errors.Is(rerr, io.EOF) && !errors.Is(rerr, context.Canceled) {
+		if rerr != nil && !errors.Is(rerr, io.EOF) && !reverseProxyIsBenignTunnelError(rerr) {
 			p.logf(nil, "reverse proxy read error during body copy: %v", rerr)
 		}
 		if nr > 0 {
@@ -638,6 +1492,10 @@ func reverseProxyStatusCode(err error) int {
 	if errors.As(err, &statusErr) && statusErr.status > 0 {
 		return statusErr.status
 	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return http.StatusGatewayTimeout
+	}
 	return http.StatusBadGateway
 }
 
@@ -647,6 +1505,75 @@ func validateReverseProxyTarget(target *url.URL) error {
 	}
 	if target.Scheme == "" || target.Host == "" {
 		return errReverseProxyInvalidTarget
+	}
+	return nil
+}
+
+func buildReverseProxyUpstreams(config ReverseProxyConfig) ([]*reverseProxyUpstream, error) {
+	if config.Target != nil && len(config.Targets) > 0 {
+		return nil, errors.New("reverse proxy Target and Targets cannot be used together")
+	}
+
+	targets := make([]*url.URL, 0, max(1, len(config.Targets)))
+	if config.Target != nil {
+		target := cloneReverseProxyURL(config.Target)
+		normalizeReverseProxyTarget(target)
+		if err := validateReverseProxyTarget(target); err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	for i, rawTarget := range config.Targets {
+		trimmed := strings.TrimSpace(rawTarget)
+		if trimmed == "" {
+			return nil, fmt.Errorf("reverse proxy target at index %d is empty", i)
+		}
+		target, err := url.Parse(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("reverse proxy target at index %d is invalid: %w", i, err)
+		}
+		normalizeReverseProxyTarget(target)
+		if err := validateReverseProxyTarget(target); err != nil {
+			return nil, fmt.Errorf("reverse proxy target at index %d is invalid: %w", i, err)
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		return nil, errReverseProxyNilTarget
+	}
+
+	upstreams := make([]*reverseProxyUpstream, 0, len(targets))
+	for i, target := range targets {
+		useH2C := strings.EqualFold(target.Scheme, "h2c")
+		if useH2C {
+			target = cloneReverseProxyURL(target)
+			target.Scheme = "http"
+		}
+		upstream := &reverseProxyUpstream{
+			key:    fmt.Sprintf("%d:%s", i, target.String()),
+			target: target,
+			index:  i,
+			useH2C: useH2C || config.AllowH2CUpstream,
+		}
+		if config.Transport == nil {
+			upstream.extendedConnectTransport = newHTTP2ExtendedConnectTransport()
+			upstream.bridgeTransport = newHTTP1BridgeTransport()
+			if upstream.useH2C {
+				upstream.h2cTransport = newH2CTransport()
+			}
+		}
+		upstreams = append(upstreams, upstream)
+	}
+	return upstreams, nil
+}
+
+func validateReverseProxyForwardedBy(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if !isValidForwardedNodeIdentifier(trimmed) {
+		return fmt.Errorf("reverse proxy ForwardedBy must be an RFC 7239 node identifier, got %q", value)
 	}
 	return nil
 }
@@ -732,6 +1659,136 @@ func buildForwardedHeaderValue(clientIP, by, host, scheme string) string {
 	return strings.Join(pairs, ";")
 }
 
+func reverseProxyUsesForwardedHeader(policy ForwardedHeadersPolicy) bool {
+	return policy == ForwardedBoth || policy == ForwardedRFC7239Only
+}
+
+func reverseProxyPrepareExtendedConnectBridge(req *http.Request) (context.Context, bool, error) {
+	if req == nil {
+		return context.Background(), false, nil
+	}
+	protocol := reverseProxyExtendedConnectProtocol(req)
+	if req.Method != http.MethodConnect || protocol == "" || !strings.EqualFold(protocol, "websocket") {
+		return req.Context(), false, nil
+	}
+
+	bridge := &reverseProxyExtendedConnectBridge{body: req.Body}
+	ctx := context.WithValue(req.Context(), reverseProxyExtendedConnectBridge{}, bridge)
+	req.Header.Del(":protocol")
+	req.Method = http.MethodGet
+	req.Body = http.NoBody
+	req.ContentLength = 0
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	key, err := reverseProxyGenerateWebSocketKey()
+	if err != nil {
+		return nil, false, fmt.Errorf("reverse proxy failed to generate websocket key: %w", err)
+	}
+	req.Header.Set("Sec-WebSocket-Key", key)
+	return ctx, true, nil
+}
+
+func reverseProxyExtendedConnectBridgeFromContext(ctx context.Context) *reverseProxyExtendedConnectBridge {
+	if ctx == nil {
+		return nil
+	}
+	bridge, _ := ctx.Value(reverseProxyExtendedConnectBridge{}).(*reverseProxyExtendedConnectBridge)
+	return bridge
+}
+
+func reverseProxyGenerateWebSocketKey() (string, error) {
+	key := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(key), nil
+}
+
+func reverseProxyIsExtendedConnectRequest(req *http.Request) bool {
+	return reverseProxyExtendedConnectProtocol(req) != ""
+}
+
+func reverseProxyExtendedConnectProtocol(req *http.Request) string {
+	if req == nil || req.Method != http.MethodConnect || req.Header == nil {
+		return ""
+	}
+	return textproto.TrimString(req.Header.Get(":protocol"))
+}
+
+func isValidForwardedNodeIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "[") {
+		closing := strings.IndexByte(value, ']')
+		if closing <= 1 {
+			return false
+		}
+		addr, err := netip.ParseAddr(value[1:closing])
+		if err != nil || !addr.Is6() {
+			return false
+		}
+		if closing == len(value)-1 {
+			return true
+		}
+		if value[closing+1] != ':' {
+			return false
+		}
+		return isValidForwardedNodePort(value[closing+2:])
+	}
+
+	host, port, hasPort := strings.Cut(value, ":")
+	if hasPort {
+		switch {
+		case host == "unknown", isValidForwardedObfuscatedIdentifier(host):
+			return isValidForwardedNodePort(port)
+		default:
+			addr, err := netip.ParseAddr(host)
+			return err == nil && addr.Is4() && isValidForwardedNodePort(port)
+		}
+	}
+
+	if value == "unknown" || isValidForwardedObfuscatedIdentifier(value) {
+		return true
+	}
+	addr, err := netip.ParseAddr(value)
+	return err == nil && addr.Is4()
+}
+
+func isValidForwardedNodePort(value string) bool {
+	if value == "" {
+		return false
+	}
+	if isValidForwardedObfuscatedIdentifier(value) {
+		return true
+	}
+	if len(value) > 5 {
+		return false
+	}
+	port, err := strconv.Atoi(value)
+	return err == nil && port > 0 && port <= 65535
+}
+
+func isValidForwardedObfuscatedIdentifier(value string) bool {
+	if len(value) < 2 || value[0] != '_' {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		b := value[i]
+		if (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') {
+			continue
+		}
+		switch b {
+		case '.', '_', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func formatForwardedFor(clientIP string) string {
 	addr, err := netip.ParseAddr(clientIP)
 	if err != nil {
@@ -799,8 +1856,8 @@ func reverseProxyViaProtocol(major, minor int, raw string) string {
 	if major > 0 {
 		return strconv.Itoa(major) + "." + strconv.Itoa(minor)
 	}
-	if strings.HasPrefix(raw, "HTTP/") {
-		return strings.TrimPrefix(raw, "HTTP/")
+	if after, ok := strings.CutPrefix(raw, "HTTP/"); ok {
+		return after
 	}
 	return raw
 }
@@ -815,6 +1872,47 @@ func rewriteReverseProxyURL(req *http.Request, target *url.URL) {
 	} else {
 		req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
 	}
+}
+
+func rewriteReverseProxyConnectRequest(req *http.Request, target *url.URL) error {
+	connectTarget, err := reverseProxyConnectTarget(target)
+	if err != nil {
+		return &reverseProxyStatusError{status: http.StatusBadRequest, err: err}
+	}
+	req.URL.Scheme = target.Scheme
+	req.URL.Host = target.Host
+	req.URL.Path = ""
+	req.URL.RawPath = ""
+	req.URL.RawQuery = ""
+	req.URL.Opaque = connectTarget
+	req.Host = connectTarget
+	return nil
+}
+
+func reverseProxyConnectTarget(target *url.URL) (string, error) {
+	if target == nil {
+		return "", errReverseProxyNilTarget
+	}
+	host := target.Hostname()
+	if host == "" {
+		return "", errReverseProxyInvalidTarget
+	}
+	port := target.Port()
+	if port == "" {
+		switch strings.ToLower(target.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return "", fmt.Errorf("reverse proxy CONNECT target requires a supported scheme, got %q", target.Scheme)
+		}
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum <= 0 || portNum > 65535 {
+		return "", fmt.Errorf("reverse proxy CONNECT target has invalid port %q", port)
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 func joinReverseProxyURLPath(base, incoming *url.URL) (string, string) {
@@ -873,7 +1971,7 @@ var reverseProxyHopHeaders = []string{
 
 func removeHopByHopHeaders(header http.Header) {
 	for _, connectionValue := range header["Connection"] {
-		for _, token := range strings.Split(connectionValue, ",") {
+		for token := range strings.SplitSeq(connectionValue, ",") {
 			trimmed := textproto.TrimString(token)
 			if trimmed != "" {
 				header.Del(trimmed)
@@ -897,7 +1995,7 @@ func headerValuesContainToken(values []string, token string) bool {
 		return false
 	}
 	for _, value := range values {
-		for _, part := range strings.Split(value, ",") {
+		for part := range strings.SplitSeq(value, ",") {
 			if strings.EqualFold(textproto.TrimString(part), token) {
 				return true
 			}
@@ -917,6 +2015,59 @@ func cleanReverseProxyQueryParams(rawQuery string) string {
 	// consistent and reduces parameter-smuggling ambiguity.
 	values, _ := url.ParseQuery(rawQuery)
 	return values.Encode()
+}
+
+func reverseProxyShouldPanicOnCopyError(req *http.Request) bool {
+	return req != nil && req.Context().Value(http.ServerContextKey) != nil
+}
+
+func reverseProxyCanRetryRequest(req *http.Request) bool {
+	if req == nil || req.Method == http.MethodConnect || reverseProxyUpgradeType(req.Header) != "" || !reverseProxyMethodIsSafe(req.Method) {
+		return false
+	}
+	if req.Body == nil || req.ContentLength == 0 {
+		return true
+	}
+	return req.GetBody != nil
+}
+
+func reverseProxyShouldCountPassiveFailure(req *http.Request, err error) bool {
+	if err == nil || reverseProxyIsBenignTunnelError(err) {
+		return false
+	}
+	if req != nil && req.Context().Err() != nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled)
+}
+
+func reverseProxyMethodIsSafe(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+func reverseProxyIsBenignTunnelError(err error) bool {
+	return err == nil || errors.Is(err, errReverseProxyCopyDone) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler) || reverseProxyIsClosedBodyError(err)
+}
+
+func reverseProxyIsClosedBodyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var streamErr http2.StreamError
+	if errors.As(err, &streamErr) && streamErr.Code == http2.ErrCodeCancel {
+		return true
+	}
+	switch err.Error() {
+	case "body closed by handler", "http2: response body closed", "response body closed":
+		return true
+	default:
+		return false
+	}
 }
 
 func reverseProxyBaseResponseWriter(writer ResponseWriter) http.ResponseWriter {

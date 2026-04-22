@@ -11,18 +11,16 @@ import (
 )
 
 // mergedContext 实现了 context.Context 接口, 是 Merge 函数返回的实际类型.
+// 嵌入 cancelCtx 作为基础 context, 支持 cause 传播.
+// deadlineCtx 作为 cancelCtx 的子 context, 确保 deadline 到期时 cancelCtx 也被取消.
 type mergedContext struct {
-	// 嵌入一个基础 context, 它持有最早的 deadline 和取消信号.
 	context.Context
-	// 保存了所有的父 context, 用于 Value() 方法的查找.
 	parents []context.Context
-	// 用于手动取消此 mergedContext 的函数.
-	cancel context.CancelFunc
 }
 
 // MergeCtx 创建并返回一个新的 context.Context.
 // 这个新的 context 会在任何一个传入的父 contexts 被取消时, 或者当返回的 CancelFunc 被调用时,
-// 自动被取消 (逻辑或关系).
+// 自动被取消 (逻辑或关系). 父 context 的取消原因 (cause) 会自动传播到返回的 context.
 //
 // 新的 context 会继承:
 // - Deadline: 所有父 context 中最早的截止时间.
@@ -32,7 +30,8 @@ func MergeCtx(parents ...context.Context) (ctx context.Context, cancel context.C
 		return context.WithCancel(context.Background())
 	}
 	if len(parents) == 1 {
-		return context.WithCancel(parents[0])
+		ctx, cancel := context.WithCancelCause(parents[0])
+		return ctx, func() { cancel(nil) }
 	}
 
 	var earliestDeadline time.Time
@@ -44,79 +43,93 @@ func MergeCtx(parents ...context.Context) (ctx context.Context, cancel context.C
 		}
 	}
 
-	var baseCtx context.Context
-	var baseCancel context.CancelFunc
+	// cancelCtx 作为基础 context, 提供 CancelCauseFunc 以支持 cause 传播.
+	cancelCtx, cancelCause := context.WithCancelCause(context.Background())
+
+	// deadlineCtx 作为 cancelCtx 的子 context (如果有 deadline).
+	// 当 cancelCtx 被取消时, deadlineCtx 也会被取消;
+	// 当 deadline 到期时, deadlineCtx 自行取消, watcher 负责关闭 cancelCtx.
+	var deadlineCtx context.Context
+	var deadlineCancel context.CancelFunc
 	if !earliestDeadline.IsZero() {
-		baseCtx, baseCancel = context.WithDeadline(context.Background(), earliestDeadline)
-	} else {
-		baseCtx, baseCancel = context.WithCancel(context.Background())
+		deadlineCtx, deadlineCancel = context.WithDeadlineCause(cancelCtx, earliestDeadline, context.DeadlineExceeded)
+	}
+
+	// 嵌入的 context: 有 deadline 时用 deadlineCtx (以返回正确的 Deadline),
+	// 否则用 cancelCtx.
+	embedCtx := cancelCtx
+	if deadlineCtx != nil {
+		embedCtx = deadlineCtx
 	}
 
 	mc := &mergedContext{
-		Context: baseCtx,
+		Context: embedCtx,
 		parents: parents,
-		cancel:  baseCancel,
 	}
 
-	// 启动一个监控 goroutine.
+	// 启动监控 goroutine, 监听 parent 取消或 deadline 到期.
 	go func() {
-		defer mc.cancel()
+		// 将 cancelCtx 加入 orDone, 确保手动 cancel() 时 orDone goroutine 能退出, 防止泄漏.
+		parentDone := orDone(append(mc.parents, cancelCtx)...)
 
-		// orDone 会返回一个 channel, 当任何一个父 context 被取消时, 这个 channel 就会关闭.
-		// 同时监听 baseCtx.Done() 以便支持手动取消.
-		select {
-		case <-orDone(mc.parents...):
-		case <-mc.Context.Done():
+		if deadlineCtx != nil {
+			defer deadlineCancel()
+			select {
+			case <-parentDone:
+				// parent 取消或手动 cancel()
+				for _, p := range mc.parents {
+					if p.Err() != nil {
+						cancelCause(context.Cause(p))
+						return
+					}
+				}
+				// 手动 cancel(), cause 已由 cancelCause() 设置
+			case <-deadlineCtx.Done():
+				// deadline 到期, 需要关闭 cancelCtx 并设置 cause
+				cancelCause(context.DeadlineExceeded)
+			}
+		} else {
+			<-parentDone
+			for _, p := range mc.parents {
+				if p.Err() != nil {
+					cancelCause(context.Cause(p))
+					return
+				}
+			}
 		}
 	}()
 
-	return mc, mc.cancel
+	return mc, func() { cancelCause(nil) }
 }
 
-// Value 返回当前Ctx Value
+// Value 返回当前Ctx Value. 先检查嵌入的 context (以支持 context.Cause),
+// 再按传入顺序从 parents 中查找.
 func (mc *mergedContext) Value(key any) any {
-	return mc.Context.Value(key)
+	if v := mc.Context.Value(key); v != nil {
+		return v
+	}
+	for _, p := range mc.parents {
+		if val := p.Value(key); val != nil {
+			return val
+		}
+	}
+	return nil
 }
 
-// Deadline 实现了 context.Context 的 Deadline 方法.
-func (mc *mergedContext) Deadline() (deadline time.Time, ok bool) {
-	return mc.Context.Deadline()
-}
+// Deadline, Done, Err 均由嵌入的 context.Context 提供.
 
-// Done 实现了 context.Context 的 Done 方法.
-func (mc *mergedContext) Done() <-chan struct{} {
-	return mc.Context.Done()
-}
-
-// Err 实现了 context.Context 的 Err 方法.
-func (mc *mergedContext) Err() error {
-	return mc.Context.Err()
-}
-
-// orDone 是一个辅助函数, 返回一个 channel.
-// 当任意一个输入 context 的 Done() channel 关闭时, orDone 返回的 channel 也会关闭.
-// 这是一个非阻塞的、不会泄漏 goroutine 的实现.
+// orDone 返回一个 channel, 当任意一个输入 context 的 Done() channel 关闭时关闭.
 func orDone(contexts ...context.Context) <-chan struct{} {
 	done := make(chan struct{})
-
 	var once sync.Once
-	closeDone := func() {
-		once.Do(func() {
-			close(done)
-		})
-	}
-
-	// 为每个父 context 启动一个 goroutine.
 	for _, ctx := range contexts {
 		go func(c context.Context) {
 			select {
 			case <-c.Done():
-				closeDone()
+				once.Do(func() { close(done) })
 			case <-done:
-				// orDone 已经被其他 goroutine 关闭了, 当前 goroutine 可以安全退出.
 			}
 		}(ctx)
 	}
-
 	return done
 }

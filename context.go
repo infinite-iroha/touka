@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/WJQSERVER/wanf"
-	"github.com/fenthope/reco"
 	"github.com/go-json-experiment/json"
 
 	"github.com/WJQSERVER-STUDIO/go-utils/iox"
@@ -43,6 +42,8 @@ type Context struct {
 	Params   Params        // 从 httprouter 获取的路径参数
 	handlers HandlersChain // 当前请求的处理函数链 (中间件 + 最终handler)
 	index    int8          // 当前执行到处理链的哪个位置
+
+	requestBodyPrepared bool
 
 	mu   sync.RWMutex
 	Keys map[string]any // 用于在中间件之间传递数据
@@ -71,6 +72,12 @@ type Context struct {
 	// skippedNodes 用于记录跳过的节点信息，以便回溯
 	// 通常在处理嵌套路由时使用
 	SkippedNodes []skippedNode
+
+	// fixedPathBuf 用于复用固定路径重定向时的大小写修正结果缓冲.
+	fixedPathBuf []byte
+
+	allowedMethodsBuf []string
+	allowHeaderBuf    []byte
 }
 
 // --- Context 相关方法实现 ---
@@ -95,18 +102,41 @@ func (c *Context) reset(w http.ResponseWriter, req *http.Request) {
 	}
 	c.handlers = nil
 	c.index = -1                          // 初始为 -1，`Next()` 将其设置为 0
-	c.Keys = make(map[string]any)         // 每次请求重新创建 map，避免数据污染
+	c.Keys = nil                          // 仅在首次 Set 时创建，避免每个请求都分配 map
 	c.Errors = c.Errors[:0]               // 清空 Errors 切片
 	c.queryCache = nil                    // 清空查询参数缓存
 	c.formCache = nil                     // 清空表单数据缓存
 	c.ctx = req.Context()                 // 使用请求的上下文，继承其取消信号和值
 	c.sameSite = http.SameSiteDefaultMode // 默认 SameSite 模式
 	c.MaxRequestBodySize = c.engine.GlobalMaxRequestBodySize
+	c.requestBodyPrepared = false
 
 	if cap(c.SkippedNodes) > 0 {
 		c.SkippedNodes = c.SkippedNodes[:0]
 	} else {
 		c.SkippedNodes = make([]skippedNode, 0, 256)
+	}
+	if cap(c.fixedPathBuf) > 0 {
+		c.fixedPathBuf = c.fixedPathBuf[:0]
+	}
+	if cap(c.allowedMethodsBuf) > 0 {
+		c.allowedMethodsBuf = c.allowedMethodsBuf[:0]
+	}
+	if cap(c.allowHeaderBuf) > 0 {
+		c.allowHeaderBuf = c.allowHeaderBuf[:0]
+	}
+}
+
+func (c *Context) writeResponseBody(data []byte, contextMsg string) {
+	if len(data) == 0 {
+		return
+	}
+	if _, err := c.Writer.Write(data); err != nil {
+		wrapped := fmt.Errorf("%s: %w", contextMsg, err)
+		c.AddError(wrapped)
+		if c.engine != nil && c.engine.logger != nil {
+			c.engine.logger.Errorf("%s: %v", contextMsg, err)
+		}
 	}
 }
 
@@ -237,6 +267,18 @@ func (c *Context) SetMaxRequestBodySize(size int64) {
 	c.MaxRequestBodySize = size
 }
 
+func (c *Context) prepareRequestBody() io.ReadCloser {
+	if c.Request == nil || c.Request.Body == nil {
+		return nil
+	}
+	if c.requestBodyPrepared || c.MaxRequestBodySize <= 0 {
+		return c.Request.Body
+	}
+	c.Request.Body = NewMaxBytesReader(c.Request.Body, c.MaxRequestBodySize)
+	c.requestBodyPrepared = true
+	return c.Request.Body
+}
+
 // Query 从 URL 查询参数中获取值
 // 懒加载解析查询参数，并进行缓存
 func (c *Context) Query(key string) string {
@@ -258,7 +300,39 @@ func (c *Context) DefaultQuery(key, defaultValue string) string {
 // 懒加载解析表单数据，并进行缓存
 func (c *Context) PostForm(key string) string {
 	if c.formCache == nil {
-		c.Request.ParseMultipartForm(defaultMemory) // 解析 multipart/form-data 或 application/x-www-form-urlencoded
+		if c.MaxRequestBodySize > 0 {
+			c.prepareRequestBody()
+		}
+		contentType := c.Request.Header.Get("Content-Type")
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			c.AddError(fmt.Errorf("parse form error: %w", err))
+			c.formCache = make(url.Values)
+			return ""
+		}
+
+		switch mediaType {
+		case "multipart/form-data":
+			if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
+				c.AddError(fmt.Errorf("parse form error: %w", err))
+				c.formCache = make(url.Values)
+				return ""
+			}
+		case "application/x-www-form-urlencoded":
+			if err := c.Request.ParseForm(); err != nil {
+				c.AddError(fmt.Errorf("parse form error: %w", err))
+				c.formCache = make(url.Values)
+				return ""
+			}
+		default:
+			if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
+				if !errors.Is(err, http.ErrNotMultipart) {
+					c.AddError(fmt.Errorf("parse form error: %w", err))
+					c.formCache = make(url.Values)
+					return ""
+				}
+			}
+		}
 		c.formCache = c.Request.PostForm
 	}
 	return c.formCache.Get(key)
@@ -282,20 +356,20 @@ func (c *Context) Param(key string) string {
 func (c *Context) Raw(code int, contentType string, data []byte) {
 	c.Writer.Header().Set("Content-Type", contentType)
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(data)
+	c.writeResponseBody(data, "failed to write raw response")
 }
 
 // String 向响应写入格式化的字符串
 func (c *Context) String(code int, format string, values ...any) {
 	c.Writer.WriteHeader(code)
-	c.Writer.Write(fmt.Appendf(nil, format, values...))
+	c.writeResponseBody(fmt.Appendf(nil, format, values...), "failed to write string response")
 }
 
 // Text 向响应写入无需格式化的string
 func (c *Context) Text(code int, text string) {
 	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	c.Writer.WriteHeader(code)
-	c.Writer.Write([]byte(text))
+	c.writeResponseBody([]byte(text), "failed to write text response")
 }
 
 // FileText
@@ -338,8 +412,11 @@ func (c *Context) FileText(code int, filePath string) {
 	}
 
 	c.SetHeader("Content-Type", "text/plain; charset=utf-8")
-
-	c.SetBodyStream(file, int(fileInfo.Size()))
+	c.Writer.Header().Set("Content-Length", fmt.Sprintf("%d", fileInfo.Size()))
+	c.Writer.WriteHeader(code)
+	if _, err := iox.Copy(c.Writer, file); err != nil {
+		c.AddError(fmt.Errorf("failed to write file %s to response: %w", cleanPath, err))
+	}
 }
 
 /*
@@ -417,6 +494,22 @@ func (c *Context) JSON(code int, obj any) {
 	}
 }
 
+// JSONBuf 先将 JSON 编码到 buffer, 成功后再写入状态码和响应体.
+// 与 JSON 相比，编码失败时可以正确返回 500 状态码，代价是多一次内存分配.
+func (c *Context) JSONBuf(code int, obj any) {
+	var buf bytes.Buffer
+	if err := json.MarshalWrite(&buf, obj); err != nil {
+		errMsg := fmt.Errorf("failed to marshal JSON: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+		return
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	c.writeResponseBody(buf.Bytes(), "failed to write buffered JSON response")
+}
+
 // GOB 向响应写入GOB数据
 // 设置 Content-Type 为 application/octet-stream
 func (c *Context) GOB(code int, obj any) {
@@ -431,6 +524,21 @@ func (c *Context) GOB(code int, obj any) {
 	}
 }
 
+// GOBBuf 先将 GOB 编码到 buffer, 成功后再写入状态码和响应体.
+func (c *Context) GOBBuf(code int, obj any) {
+	var buf bytes.Buffer
+	encoder := gob.NewEncoder(&buf)
+	if err := encoder.Encode(obj); err != nil {
+		errMsg := fmt.Errorf("failed to encode GOB: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "application/octet-stream")
+	c.Writer.WriteHeader(code)
+	c.writeResponseBody(buf.Bytes(), "failed to write buffered GOB response")
+}
+
 // WANF向响应写入WANF数据
 // 设置 application/vnd.wjqserver.wanf; charset=utf-8
 func (c *Context) WANF(code int, obj any) {
@@ -443,6 +551,21 @@ func (c *Context) WANF(code int, obj any) {
 		c.ErrorUseHandle(http.StatusInternalServerError, fmt.Errorf("failed to encode WANF: %w", err))
 		return
 	}
+}
+
+// WANFBuf 先将 WANF 编码到 buffer, 成功后再写入状态码和响应体.
+func (c *Context) WANFBuf(code int, obj any) {
+	var buf bytes.Buffer
+	encoder := wanf.NewStreamEncoder(&buf)
+	if err := encoder.Encode(obj); err != nil {
+		errMsg := fmt.Errorf("failed to encode WANF: %w", err)
+		c.AddError(errMsg)
+		c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "application/vnd.wjqserver.wanf; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	c.writeResponseBody(buf.Bytes(), "failed to write buffered WANF response")
 }
 
 // HTML 渲染 HTML 模板
@@ -466,7 +589,37 @@ func (c *Context) HTML(code int, name string, obj any) {
 		// 可以扩展支持其他渲染器接口
 	}
 	// 默认简单输出，用于未配置 HTMLRender 的情况
-	c.Writer.Write(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj))
+	c.writeResponseBody(fmt.Appendf(nil, "<!-- HTML rendered for %s -->\n<pre>%v</pre>", name, obj), "failed to write HTML response")
+}
+
+// HTMLBuf 先将 HTML 模板渲染到 buffer, 成功后再写入状态码和响应体.
+// 如果模板渲染失败，则返回 500 错误且不写入任何内容.
+func (c *Context) HTMLBuf(code int, name string, obj any) {
+	if c.engine == nil || c.engine.HTMLRender == nil {
+		// 没有渲染器，回退到简单输出
+		c.HTML(code, name, obj)
+		return
+	}
+
+	if tpl, ok := c.engine.HTMLRender.(*template.Template); ok {
+		var buf bytes.Buffer
+		err := tpl.ExecuteTemplate(&buf, name, obj)
+		if err != nil {
+			// 渲染失败，记录错误并返回 500，不写入任何内容
+			errMsg := fmt.Errorf("failed to render HTML template '%s': %w", name, err)
+			c.AddError(errMsg)
+			c.ErrorUseHandle(http.StatusInternalServerError, errMsg)
+			return
+		}
+		// 渲染成功，写入响应
+		c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		c.Writer.WriteHeader(code)
+		c.writeResponseBody(buf.Bytes(), "failed to write buffered HTML response")
+		return
+	}
+
+	// 不支持的渲染器类型，回退到简单输出
+	c.HTML(code, name, obj)
 }
 
 // Redirect 执行 HTTP 重定向
@@ -481,10 +634,16 @@ func (c *Context) Redirect(code int, location string) {
 
 // ShouldBindJSON 尝试将请求体绑定到 JSON 对象
 func (c *Context) ShouldBindJSON(obj any) error {
-	if c.Request.Body == nil {
+	var body io.ReadCloser
+	if c.MaxRequestBodySize > 0 {
+		body = c.prepareRequestBody()
+	} else {
+		body = c.Request.Body
+	}
+	if body == nil {
 		return errors.New("request body is empty")
 	}
-	err := json.UnmarshalRead(c.Request.Body, obj)
+	err := json.UnmarshalRead(body, obj)
 	if err != nil {
 		return fmt.Errorf("json binding error: %w", err)
 	}
@@ -493,10 +652,16 @@ func (c *Context) ShouldBindJSON(obj any) error {
 
 // ShouldBindWANF 尝试将 WANF 格式的请求体绑定到对象
 func (c *Context) ShouldBindWANF(obj any) error {
-	if c.Request.Body == nil {
+	var body io.ReadCloser
+	if c.MaxRequestBodySize > 0 {
+		body = c.prepareRequestBody()
+	} else {
+		body = c.Request.Body
+	}
+	if body == nil {
 		return errors.New("request body is empty")
 	}
-	decoder, err := wanf.NewStreamDecoder(c.Request.Body)
+	decoder, err := wanf.NewStreamDecoder(body)
 	if err != nil {
 		return fmt.Errorf("failed to create WANF decoder: %w", err)
 	}
@@ -509,10 +674,16 @@ func (c *Context) ShouldBindWANF(obj any) error {
 
 // ShouldBindGOB 尝试将 GOB 格式的请求体绑定到对象
 func (c *Context) ShouldBindGOB(obj any) error {
-	if c.Request.Body == nil {
+	var body io.ReadCloser
+	if c.MaxRequestBodySize > 0 {
+		body = c.prepareRequestBody()
+	} else {
+		body = c.Request.Body
+	}
+	if body == nil {
 		return errors.New("request body is empty")
 	}
-	decoder := gob.NewDecoder(c.Request.Body)
+	decoder := gob.NewDecoder(body)
 	if err := decoder.Decode(obj); err != nil {
 		return fmt.Errorf("GOB binding error: %w", err)
 	}
@@ -629,6 +800,10 @@ func setFieldValue(field reflect.Value, values []string) error {
 // ShouldBindForm 尝试将表单数据绑定到结构体
 // 支持 application/x-www-form-urlencoded 和 multipart/form-data
 func (c *Context) ShouldBindForm(obj any) error {
+	if c.MaxRequestBodySize > 0 {
+		c.prepareRequestBody()
+	}
+
 	contentType := c.Request.Header.Get("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -637,7 +812,7 @@ func (c *Context) ShouldBindForm(obj any) error {
 
 	switch mediaType {
 	case "multipart/form-data":
-		if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		if err := c.Request.ParseMultipartForm(defaultMemory); err != nil {
 			return fmt.Errorf("parse multipart form error: %w", err)
 		}
 	case "application/x-www-form-urlencoded":
@@ -651,6 +826,7 @@ func (c *Context) ShouldBindForm(obj any) error {
 	if err := bindForm(c.Request.Form, obj); err != nil {
 		return fmt.Errorf("form binding error: %w", err)
 	}
+	c.formCache = c.Request.PostForm
 	return nil
 }
 
@@ -688,10 +864,29 @@ func (c *Context) GetErrors() []error {
 	return c.Errors
 }
 
-// Client 返回 Engine 提供的 HTTPClient
-// 方便在请求处理函数中进行出站 HTTP 请求
+// Client 返回当前请求的 HTTPClient
+// 如果请求处理函数或中间件设置了自定义 HTTPClient，返回该实例；
+// 否则返回 Engine 提供的默认实例
+//
+// Deprecated: 使用 HTTPC() 替代，新方法会自动关联请求 Context
 func (c *Context) Client() *httpc.Client {
-	return c.HTTPClient
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	return c.engine.HTTPClient
+}
+
+// HTTPC 返回自动关联请求 Context 的 HTTP 客户端
+// 当请求被取消时，通过此客户端发起的出站请求也会自动取消
+func (c *Context) HTTPC() *contextHTTPClient {
+	client := c.HTTPClient
+	if client == nil {
+		client = c.engine.HTTPClient
+	}
+	return &contextHTTPClient{
+		client: client,
+		ctx:    c.ctx,
+	}
 }
 
 // Context() 返回请求的上下文，用于取消操作
@@ -751,37 +946,30 @@ func (c *Context) WriteStream(reader io.Reader) (written int64, err error) {
 // GetReqBody 以获取一个 io.ReadCloser 接口，用于读取请求体
 // 注意：请求体只能读取一次
 func (c *Context) GetReqBody() io.ReadCloser {
+	if c.MaxRequestBodySize > 0 {
+		return c.prepareRequestBody()
+	}
+	if c.Request == nil || c.Request.Body == nil {
+		return nil
+	}
 	return c.Request.Body
 }
 
 // GetReqBodyFull 读取并返回请求体的所有内容
 // 注意：请求体只能读取一次
 func (c *Context) GetReqBodyFull() ([]byte, error) {
-	if c.Request.Body == nil {
+	body := c.GetReqBody()
+	if body == nil {
 		return nil, nil
 	}
+	defer func() {
+		err := body.Close()
+		if err != nil {
+			c.AddError(fmt.Errorf("failed to close request body: %w", err))
+		}
+	}()
 
-	var limitBytesReader io.ReadCloser
-
-	if c.MaxRequestBodySize > 0 {
-		limitBytesReader = NewMaxBytesReader(c.Request.Body, c.MaxRequestBodySize)
-		defer func() {
-			err := limitBytesReader.Close()
-			if err != nil {
-				c.AddError(fmt.Errorf("failed to close request body: %w", err))
-			}
-		}()
-	} else {
-		limitBytesReader = c.Request.Body
-		defer func() {
-			err := limitBytesReader.Close()
-			if err != nil {
-				c.AddError(fmt.Errorf("failed to close request body: %w", err))
-			}
-		}()
-	}
-
-	data, err := iox.ReadAll(limitBytesReader)
+	data, err := io.ReadAll(body)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -791,31 +979,18 @@ func (c *Context) GetReqBodyFull() ([]byte, error) {
 
 // 类似 GetReqBodyFull, 返回 *bytes.Buffer
 func (c *Context) GetReqBodyBuffer() (*bytes.Buffer, error) {
-	if c.Request.Body == nil {
+	body := c.GetReqBody()
+	if body == nil {
 		return nil, nil
 	}
+	defer func() {
+		err := body.Close()
+		if err != nil {
+			c.AddError(fmt.Errorf("failed to close request body: %w", err))
+		}
+	}()
 
-	var limitBytesReader io.ReadCloser
-
-	if c.MaxRequestBodySize > 0 {
-		limitBytesReader = NewMaxBytesReader(c.Request.Body, c.MaxRequestBodySize)
-		defer func() {
-			err := limitBytesReader.Close()
-			if err != nil {
-				c.AddError(fmt.Errorf("failed to close request body: %w", err))
-			}
-		}()
-	} else {
-		limitBytesReader = c.Request.Body
-		defer func() {
-			err := limitBytesReader.Close()
-			if err != nil {
-				c.AddError(fmt.Errorf("failed to close request body: %w", err))
-			}
-		}()
-	}
-
-	data, err := iox.ReadAll(limitBytesReader)
+	data, err := io.ReadAll(body)
 	if err != nil {
 		c.AddError(fmt.Errorf("failed to read request body: %w", err))
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -974,14 +1149,9 @@ func (c *Context) GetProtocol() string {
 	return c.Request.Proto
 }
 
-// GetHTTPC 获取框架自带传递的httpc
-func (c *Context) GetHTTPC() *httpc.Client {
-	return c.HTTPClient
-}
-
-// GetLogger 获取engine的Logger
-func (c *Context) GetLogger() *reco.Logger {
-	return c.engine.LogReco
+// GetLogger 获取engine的Logger接口
+func (c *Context) GetLogger() Logger {
+	return c.engine.logger
 }
 
 // GetReqQueryString
@@ -1084,9 +1254,17 @@ func (c *Context) SetSameSite(samesite http.SameSite) {
 }
 
 // SetCookie 设置一个 HTTP cookie
-func (c *Context) SetCookie(name, value string, maxAge int, path, domain string, secure, httpOnly bool) {
+// sameSite 参数是可选的，如果不提供则使用通过 SetSameSite 设置的值
+func (c *Context) SetCookie(name, value string, maxAge int, path, domain string, secure, httpOnly bool, sameSite ...http.SameSite) {
 	if path == "" {
 		path = "/"
+	}
+	site := c.sameSite
+	if len(sameSite) > 0 {
+		if len(sameSite) > 1 {
+			c.Warnf("SetCookie: only the first SameSite value will be used, got %d values", len(sameSite))
+		}
+		site = sameSite[0]
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     name,
@@ -1094,7 +1272,7 @@ func (c *Context) SetCookie(name, value string, maxAge int, path, domain string,
 		MaxAge:   maxAge,
 		Path:     path,
 		Domain:   domain,
-		SameSite: c.sameSite,
+		SameSite: site,
 		Secure:   secure,
 		HttpOnly: httpOnly,
 	})
@@ -1132,25 +1310,25 @@ func (c *Context) DeleteCookie(name string) {
 
 // === 日志记录 ===
 func (c *Context) Debugf(format string, args ...any) {
-	c.engine.LogReco.Debugf(format, args...)
+	c.engine.logger.Debugf(format, args...)
 }
 
 func (c *Context) Infof(format string, args ...any) {
-	c.engine.LogReco.Infof(format, args...)
+	c.engine.logger.Infof(format, args...)
 }
 
 func (c *Context) Warnf(format string, args ...any) {
-	c.engine.LogReco.Warnf(format, args...)
+	c.engine.logger.Warnf(format, args...)
 }
 
 func (c *Context) Errorf(format string, args ...any) {
-	c.engine.LogReco.Errorf(format, args...)
+	c.engine.logger.Errorf(format, args...)
 }
 
 func (c *Context) Fatalf(format string, args ...any) {
-	c.engine.LogReco.Fatalf(format, args...)
+	c.engine.logger.Fatalf(format, args...)
 }
 
 func (c *Context) Panicf(format string, args ...any) {
-	c.engine.LogReco.Panicf(format, args...)
+	c.engine.logger.Panicf(format, args...)
 }

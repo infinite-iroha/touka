@@ -197,7 +197,7 @@ func (ecw *errorCapturingResponseWriter) Written() bool {
 func (ecw *errorCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hijacker, ok := ecw.w.(http.Hijacker)
 	if !ok {
-		return nil, nil, errors.New("the underlying ResponseWriter does not support the Hijacker interface")
+		return nil, nil, http.ErrNotSupported
 	}
 	return hijacker.Hijack()
 }

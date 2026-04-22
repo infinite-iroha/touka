@@ -111,46 +111,40 @@ func (c *Context) EventStream(streamer func(w io.Writer) bool) {
 // EventStreamChan 返回用于 SSE 事件流的 channel.
 // 这是为高级并发场景设计的、更灵活的API.
 //
-// 重要:
-//   - 调用者必须 close(eventChan) 来结束事件流.
-//   - 调用者必须在独立的 goroutine 中消费 errChan 来处理错误和连接断开.
-//   - 为防止 goroutine 泄漏, 建议发送方在 select 中同时监听 c.Request.Context().Done().
+// 与 EventStream 回调模式类似, 此方法是阻塞的: handler 会在此方法中停留,
+// 直到事件 channel 被关闭 (close eventChan) 或客户端断开连接.
+// 这保证了 Context 不会在 SSE 流期间被 pool 回收.
+//
+// eventChan 必须在调用此方法之前创建, 以便调用者可以在独立的 goroutine 中发送事件.
+// 调用者必须在完成后 close(eventChan) 来结束流.
+// 生产者 goroutine 必须在 select 中监听 c.Request.Context().Done(), 否则在客户端断开时会产生 goroutine 泄漏.
 //
 // 详细用法:
 //
 //	r.GET("/sse/channel", func(c *touka.Context) {
-//	    eventChan, errChan := c.EventStreamChan()
+//	    eventChan := make(chan touka.Event)
 //
-//	    // 必须在独立的goroutine中处理错误和连接断开.
+//	    // 在独立的 goroutine 中异步发送事件.
 //	    go func() {
-//	        if err := <-errChan; err != nil {
-//	            c.Errorf("SSE channel error: %v", err)
-//	        }
-//	    }()
-//
-//	    // 在另一个goroutine中异步发送事件.
-//	    go func() {
-//	        // 重要: 必须在逻辑结束时关闭channel, 以通知框架.
-//	        defer close(eventChan)
+//	        defer close(eventChan) // 完成后关闭 channel 以结束事件流.
 //
 //	        for i := 1; i <= 5; i++ {
 //	            select {
 //	            case <-c.Request.Context().Done():
 //	                return // 客户端已断开, 退出 goroutine.
-//	            default:
-//	                eventChan <- touka.Event{
-//	                    Id:   fmt.Sprintf("%d", i),
-//	                    Data: "hello from channel",
-//	                }
-//	                time.Sleep(2 * time.Second)
+//	            case eventChan <- touka.Event{
+//	                Id:   fmt.Sprintf("%d", i),
+//	                Data: "hello from channel",
+//	            }:
 //	            }
+//	            time.Sleep(2 * time.Second)
 //	        }
 //	    }()
+//
+//	    // 阻塞直到事件流结束.
+//	    c.EventStreamChan(eventChan)
 //	})
-func (c *Context) EventStreamChan() (chan<- Event, <-chan error) {
-	eventChan := make(chan Event)
-	errChan := make(chan error, 1)
-
+func (c *Context) EventStreamChan(eventChan <-chan Event) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
 	c.Writer.Header().Del("Connection")
@@ -159,8 +153,16 @@ func (c *Context) EventStreamChan() (chan<- Event, <-chan error) {
 	c.Writer.WriteHeader(http.StatusOK)
 	c.Writer.Flush()
 
+	// 捕获稳定的引用, 不持有 *Context 指针, 以免 Context 被 pool 回收后出现竞态.
+	w := c.Writer
+	fl, _ := w.(http.Flusher)
+	reqCtx := c.Request.Context()
+
+	goroutineExited := make(chan struct{})
+
+	// 写入 goroutine: 从 eventChan 消费事件并写入响应.
 	go func() {
-		defer close(errChan)
+		defer close(goroutineExited)
 
 		for {
 			select {
@@ -168,17 +170,23 @@ func (c *Context) EventStreamChan() (chan<- Event, <-chan error) {
 				if !ok {
 					return
 				}
-				if err := event.Render(c.Writer); err != nil {
-					errChan <- err
+				if err := event.Render(w); err != nil {
 					return
 				}
-				c.Writer.Flush()
-			case <-c.Request.Context().Done():
-				errChan <- c.Request.Context().Err()
+				if fl != nil {
+					fl.Flush()
+				}
+			case <-reqCtx.Done():
 				return
 			}
 		}
 	}()
 
-	return eventChan, errChan
+	// 阻塞直到:
+	// 1. 写入 goroutine 退出 (eventChan 关闭或写入失败)
+	// 2. 客户端断开连接 (reqCtx 取消)
+	select {
+	case <-goroutineExited:
+	case <-reqCtx.Done():
+	}
 }

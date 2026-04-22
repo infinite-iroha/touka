@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Used as a workaround since we can't compare functions or their addresses
@@ -37,6 +38,23 @@ func getParams() *Params {
 func getSkippedNodes() *[]skippedNode {
 	ps := make([]skippedNode, 0, 20)
 	return &ps
+}
+
+func getValueWithTimeout(t *testing.T, tree *node, path string, unescape bool) nodeValue {
+	t.Helper()
+
+	resultCh := make(chan nodeValue, 1)
+	go func() {
+		resultCh <- tree.getValue(path, getParams(), getSkippedNodes(), unescape)
+	}()
+
+	select {
+	case value := <-resultCh:
+		return value
+	case <-time.After(2 * time.Second):
+		t.Fatalf("lookup for path %q timed out, likely stuck in backtracking", path)
+		return nodeValue{}
+	}
 }
 
 func checkRequests(t *testing.T, tree *node, requests testRequests, unescapes ...bool) {
@@ -901,6 +919,34 @@ func TestTreeInvalidNodeType(t *testing.T) {
 	}
 }
 
+func TestFindCaseInsensitivePathWithStaticAndParamRoutesDoesNotPanicOnMiss(t *testing.T) {
+	tree := &node{}
+	routes := [...]string{
+		"/:user/:repo/info/refs",
+		"/healthz",
+		"/api/db/data",
+		"/api/db/sum",
+	}
+
+	for _, route := range routes {
+		tree.addRoute(route, fakeHandler(route))
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic while looking up missing path: %v", r)
+		}
+	}()
+
+	if out, found := tree.findCaseInsensitivePath("/does-not-exist", true); found || out != nil {
+		t.Fatalf("expected missing path lookup to return no match, got %q, %t", string(out), found)
+	}
+
+	if out, found := tree.findCaseInsensitivePath("/does-not-exist", false); found || out != nil {
+		t.Fatalf("expected missing path lookup without trailing slash fix to return no match, got %q, %t", string(out), found)
+	}
+}
+
 func TestTreeInvalidParamsType(t *testing.T) {
 	tree := &node{}
 	// add a child with wildcard
@@ -1074,5 +1120,53 @@ func TestComplexBacktrackingWithCatchAll(t *testing.T) {
 	// 断言URL参数被正确地解析和提取
 	if value.params == nil || !reflect.DeepEqual(*value.params, wantParams) {
 		t.Errorf("处理路径 '%s' 时参数不匹配: \n 得到: %v\n 想要: %v", reqPath, *value.params, wantParams)
+	}
+}
+
+func TestBacktrackingFallsThroughToWildcardBranch(t *testing.T) {
+	tests := []struct {
+		name         string
+		routes       []string
+		requestPath  string
+		wantFullPath string
+		wantParams   Params
+	}{
+		{
+			name:         "param route after static dead end",
+			routes:       []string{"/foo/bar", "/foo/:id/details"},
+			requestPath:  "/foo/bar/details",
+			wantFullPath: "/foo/:id/details",
+			wantParams:   Params{{Key: "id", Value: "bar"}},
+		},
+		{
+			name:         "catch-all route after static dead end",
+			routes:       []string{"/foo/bar", "/foo/:id/*rest"},
+			requestPath:  "/foo/bar/baz.txt",
+			wantFullPath: "/foo/:id/*rest",
+			wantParams: Params{
+				{Key: "id", Value: "bar"},
+				{Key: "rest", Value: "/baz.txt"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree := &node{}
+			for _, route := range tt.routes {
+				tree.addRoute(route, fakeHandler(route))
+			}
+
+			value := getValueWithTimeout(t, tree, tt.requestPath, false)
+			if value.handlers == nil {
+				t.Fatalf("expected handlers for %q", tt.requestPath)
+			}
+			if value.fullPath != tt.wantFullPath {
+				t.Fatalf("expected full path %q for %q, got %q", tt.wantFullPath, tt.requestPath, value.fullPath)
+			}
+			if value.params == nil || !reflect.DeepEqual(*value.params, tt.wantParams) {
+				t.Fatalf("expected params %v for %q, got %v", tt.wantParams, tt.requestPath, value.params)
+			}
+		})
 	}
 }

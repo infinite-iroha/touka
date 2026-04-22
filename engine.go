@@ -7,9 +7,11 @@ package touka
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"net/http"
 
@@ -17,6 +19,7 @@ import (
 
 	"github.com/WJQSERVER-STUDIO/httpc"
 	"github.com/fenthope/reco"
+	"github.com/go-json-experiment/json"
 )
 
 // Last 返回链中的最后一个处理函数
@@ -49,7 +52,13 @@ type Engine struct {
 
 	HTTPClient *httpc.Client // 用于在此上下文中执行出站 HTTP 请求
 
+	// LogReco 保留的 reco.Logger 字段
+	// Deprecated: 使用 SetLogger/GetLogger 替代
 	LogReco *reco.Logger
+
+	// logger 是新的日志接口,支持任意 Logger 实现
+	// 优先级: logger > LogReco
+	logger Logger
 
 	HTMLRender any // 用于 HTML 模板渲染,可以设置为 *template.Template 或自定义渲染器接口
 
@@ -81,6 +90,11 @@ type Engine struct {
 
 	// GlobalMaxRequestBodySize 全局请求体Body大小限制
 	GlobalMaxRequestBodySize int64
+
+	notFoundChain            HandlersChain
+	notFoundNoMethodChain    HandlersChain
+	unmatchedFSChain         HandlersChain
+	unmatchedFSNoMethodChain HandlersChain
 }
 
 // HandleFunc 注册一个或多个 HTTP 方法的路由
@@ -116,6 +130,90 @@ type ErrorHandle struct {
 
 type ErrorHandler func(c *Context, code int, err error)
 
+var errMethodNotAllowed = errors.New("method not allowed")
+var errNotFound = errors.New("not found")
+
+type defaultErrorResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Error   string `json:"error"`
+}
+
+var defaultNotFoundBody = mustMarshalDefaultErrorBody(http.StatusNotFound, errNotFound.Error())
+var defaultMethodNotAllowedBody = mustMarshalDefaultErrorBody(http.StatusMethodNotAllowed, errMethodNotAllowed.Error())
+
+func mustMarshalDefaultErrorBody(code int, errMsg string) []byte {
+	body, err := json.Marshal(defaultErrorResponse{
+		Code:    code,
+		Message: http.StatusText(code),
+		Error:   errMsg,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func writeDefaultErrorJSON(c *Context, code int, body []byte) {
+	if c == nil || c.Writer == nil {
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	c.Writer.WriteHeader(code)
+	c.writeResponseBody(body, "failed to write default error response")
+	c.Writer.Flush()
+	c.Abort()
+}
+
+var methodNotAllowedHandler HandlerFunc = func(c *Context) {
+	httpMethod := c.Request.Method
+	requestPath := routeLookupPath(c.Request)
+	engine := c.engine
+	// 是否是OPTIONS方式
+	if httpMethod == http.MethodOptions {
+		// 如果是 OPTIONS 请求,尝试查找所有允许的方法
+		allowedMethods := engine.allowedMethodsForPath(requestPath, c.allowedMethodsBuf[:0])
+		c.allowedMethodsBuf = allowedMethods[:0]
+		if len(allowedMethods) > 0 {
+			// 如果找到了允许的方法,返回 200 OK 并设置 Allow 头部
+			allowHeader := c.allowHeaderBuf[:0]
+			for i, method := range allowedMethods {
+				if i > 0 {
+					allowHeader = append(allowHeader, ',', ' ')
+				}
+				allowHeader = append(allowHeader, method...)
+			}
+			c.allowHeaderBuf = allowHeader[:0]
+			c.Writer.Header().Set("Allow", string(allowHeader))
+			c.Status(http.StatusOK)
+			return
+		}
+		return
+	}
+	// 尝试遍历所有方法树,看是否有其他方法可以匹配当前路径
+	tempSkippedNodes := GetTempSkippedNodes()
+	for _, treeIter := range engine.methodTrees {
+		if treeIter.method == httpMethod { // 已经处理过当前方法,跳过
+			continue
+		}
+		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
+		*tempSkippedNodes = (*tempSkippedNodes)[:0]
+		value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
+		if value.handlers != nil {
+			PutTempSkippedNodes(tempSkippedNodes)
+			// 使用定义的ErrorHandle处理
+			engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errMethodNotAllowed)
+			return
+		}
+	}
+	PutTempSkippedNodes(tempSkippedNodes)
+}
+
+var notFoundHandler HandlerFunc = func(c *Context) {
+	engine := c.engine
+	engine.errorHandle.handler(c, http.StatusNotFound, errNotFound)
+}
+
 // defaultErrorHandle 默认错误处理
 func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是否已断开连接
 	select {
@@ -126,16 +224,22 @@ func defaultErrorHandle(c *Context, code int, err error) { // 检查客户端是
 		if c.Writer.Written() {
 			return
 		}
+		if len(c.Errors) == 0 {
+			switch {
+			case code == http.StatusNotFound && errors.Is(err, errNotFound):
+				writeDefaultErrorJSON(c, code, defaultNotFoundBody)
+				return
+			case code == http.StatusMethodNotAllowed && errors.Is(err, errMethodNotAllowed):
+				writeDefaultErrorJSON(c, code, defaultMethodNotAllowedBody)
+				return
+			}
+		}
 		// 输出json 状态码与状态码对应描述
 		var errMsg string
 		if err != nil {
 			errMsg = err.Error()
 		}
-		c.JSON(code, H{
-			"code":    code,
-			"message": http.StatusText(code),
-			"error":   errMsg,
-		})
+		c.JSON(code, defaultErrorResponse{Code: code, Message: http.StatusText(code), Error: errMsg})
 		c.Writer.Flush()
 		c.Abort()
 		return
@@ -210,6 +314,7 @@ func New() *Engine {
 		TLSServerConfigurator:    nil,
 		GlobalMaxRequestBodySize: -1,
 	}
+	engine.rebuildFallbackChains()
 	engine.shutdownCtx, engine.shutdownCancel = context.WithCancel(context.Background())
 	//engine.SetProtocols(GetDefaultProtocolsConfig())
 	engine.SetDefaultProtocols()
@@ -265,16 +370,30 @@ func (engine *Engine) SetRedirectFixedPath(enable bool) {
 // 是否开启MethodNotAllowed
 func (engine *Engine) SetHandleMethodNotAllowed(enable bool) {
 	engine.HandleMethodNotAllowed = enable
+	engine.rebuildFallbackChains()
 }
 
-// SetLogger传入实例
-func (engine *Engine) SetLogger(logger *reco.Logger) {
-	engine.LogReco = logger
+// SetLogger 传入 Logger 接口实例
+func (engine *Engine) SetLogger(logger Logger) {
+	engine.logger = logger
+	// 同步更新 LogReco 以保持向后兼容
+	if rl, ok := logger.(*reco.Logger); ok {
+		engine.LogReco = rl
+	} else {
+		engine.LogReco = nil
+	}
 }
 
-// 配置日志LoggerCfg
+// GetLogger 返回 Logger 接口实例
+func (engine *Engine) GetLogger() Logger {
+	return engine.logger
+}
+
+// SetLoggerCfg 使用 reco.Config 配置日志
 func (engine *Engine) SetLoggerCfg(logcfg reco.Config) {
-	engine.LogReco = NewLogger(logcfg)
+	logger := NewLogger(logcfg)
+	engine.logger = logger
+	engine.LogReco = logger
 }
 
 // 设置自定义错误处理
@@ -305,6 +424,7 @@ func (engine *Engine) SetUnMatchFSChain(fs http.FileSystem, handlers ...HandlerF
 		engine.unMatchFS.ServeUnmatchedAsFS = false
 		engine.UnMatchFSRoutes = nil
 	}
+	engine.rebuildFallbackChains()
 }
 
 // 获取默认Protocol配置
@@ -340,11 +460,28 @@ func (engine *Engine) setProtocols(config *ProtocolsConfig) {
 	}()
 }
 
+func cloneServerProtocols(protocols *http.Protocols) *http.Protocols {
+	if protocols == nil {
+		return nil
+	}
+	cloned := *protocols
+	return &cloned
+}
+
+func applyServerProtocols(srv *http.Server, protocols *http.Protocols) {
+	if protocols != nil {
+		srv.Protocols = cloneServerProtocols(protocols)
+		if srv.Protocols.HTTP2() || srv.Protocols.UnencryptedHTTP2() {
+			if err := configureHTTP2ExtendedConnectServer(srv); err != nil {
+				panic(err)
+			}
+		}
+	}
+}
+
 // applyDefaultServerConfig 应用框架的默认配置到 http.Server
 func (engine *Engine) applyDefaultServerConfig(srv *http.Server) {
-	if engine.serverProtocols != nil {
-		srv.Protocols = engine.serverProtocols
-	}
+	applyServerProtocols(srv, engine.serverProtocols)
 }
 
 // 配置全局Req Body大小限制
@@ -473,66 +610,64 @@ func PutTempSkippedNodes(skippedNodes *[]skippedNode) {
 
 // 405中间件
 func MethodNotAllowed() HandlerFunc {
-	return func(c *Context) {
-		httpMethod := c.Request.Method
-		requestPath := c.Request.URL.Path
-		engine := c.engine
-		// 是否是OPTIONS方式
-		if httpMethod == http.MethodOptions {
-			// 如果是 OPTIONS 请求,尝试查找所有允许的方法
-			allowedMethods := []string{}
-			for _, treeIter := range engine.methodTrees {
-				// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-				tempSkippedNodes := GetTempSkippedNodes()
-				value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
-				PutTempSkippedNodes(tempSkippedNodes)
-				if value.handlers != nil {
-					allowedMethods = append(allowedMethods, treeIter.method)
-				}
-			}
-			if len(allowedMethods) > 0 {
-				// 如果找到了允许的方法,返回 200 OK 并设置 Allow 头部
-				c.Writer.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-				c.Status(http.StatusOK)
-				return
-			}
-		}
-		// 尝试遍历所有方法树,看是否有其他方法可以匹配当前路径
-		for _, treeIter := range engine.methodTrees {
-			if treeIter.method == httpMethod { // 已经处理过当前方法,跳过
-				continue
-			}
-			// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
-			tempSkippedNodes := GetTempSkippedNodes()
-			value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false) // 只查找是否存在,不需要参数
-			PutTempSkippedNodes(tempSkippedNodes)
-			if value.handlers != nil {
-				// 使用定义的ErrorHandle处理
-				engine.errorHandle.handler(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-				return
-			}
-		}
-	}
+	return methodNotAllowedHandler
 }
 
 // 404最后处理
 func NotFound() HandlerFunc {
-	return func(c *Context) {
-		engine := c.engine
-		engine.errorHandle.handler(c, http.StatusNotFound, errors.New("not found"))
-	}
+	return notFoundHandler
 }
 
 // 传入并设置NoRoute (这不是最后一个处理, 你仍可以next到默认的404处理)
 func (Engine *Engine) NoRoute(handler HandlerFunc) {
 	Engine.noRoute = handler
 	Engine.noRoutes = nil
+	Engine.rebuildFallbackChains()
 }
 
 // 传入并设置NoRoutes (这不是最后一个处理, 你仍可以next到默认的404处理)
 func (Engine *Engine) NoRoutes(handlerFuncs ...HandlerFunc) {
 	Engine.noRoute = nil
 	Engine.noRoutes = handlerFuncs
+	Engine.rebuildFallbackChains()
+}
+
+func (engine *Engine) rebuildFallbackChains() {
+	buildChain := func(includeMethodNotAllowed bool, includeUnmatchedFS bool) HandlersChain {
+		finalSize := len(engine.globalHandlers) + 1 // 最后的 NotFound
+		if includeMethodNotAllowed {
+			finalSize++
+		}
+		if includeUnmatchedFS {
+			finalSize += len(engine.UnMatchFSRoutes)
+		}
+		if engine.noRoute != nil {
+			finalSize++
+		} else {
+			finalSize += len(engine.noRoutes)
+		}
+
+		chain := make(HandlersChain, 0, finalSize)
+		chain = append(chain, engine.globalHandlers...)
+		if includeMethodNotAllowed {
+			chain = append(chain, methodNotAllowedHandler)
+		}
+		if includeUnmatchedFS {
+			chain = append(chain, engine.UnMatchFSRoutes...)
+		}
+		if engine.noRoute != nil {
+			chain = append(chain, engine.noRoute)
+		} else if len(engine.noRoutes) > 0 {
+			chain = append(chain, engine.noRoutes...)
+		}
+		chain = append(chain, notFoundHandler)
+		return chain
+	}
+
+	engine.notFoundChain = buildChain(engine.HandleMethodNotAllowed, false)
+	engine.notFoundNoMethodChain = buildChain(false, false)
+	engine.unmatchedFSChain = buildChain(engine.HandleMethodNotAllowed, engine.unMatchFS.ServeUnmatchedAsFS)
+	engine.unmatchedFSNoMethodChain = buildChain(false, engine.unMatchFS.ServeUnmatchedAsFS)
 }
 
 // combineHandlers 组合多个处理函数链为一个
@@ -547,8 +682,9 @@ func (engine *Engine) combineHandlers(h1 HandlersChain, h2 HandlersChain) Handle
 
 // Use 将全局中间件添加到 Engine
 // 这些中间件将应用于所有注册的路由
-func (engine *Engine) Use(middleware ...HandlerFunc) IRouter {
+func (engine *Engine) Use(middleware ...HandlerFunc) Router {
 	engine.globalHandlers = append(engine.globalHandlers, middleware...)
+	engine.rebuildFallbackChains()
 	return engine
 }
 
@@ -615,7 +751,7 @@ func (engine *Engine) GetRouterInfo() []RouteInfo {
 
 // Group 创建一个新的路由组
 // 路由组允许将具有相同前缀路径和/或共享中间件的路由组织在一起
-func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) IRouter {
+func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) Router {
 	return &RouterGroup{
 		Handlers: engine.combineHandlers(engine.globalHandlers, handlers), // 继承全局中间件
 		basePath: resolveRoutePath("/", relativePath),
@@ -624,7 +760,7 @@ func (engine *Engine) Group(relativePath string, handlers ...HandlerFunc) IRoute
 }
 
 // RouterGroup 表示一个路由分组,可以添加组特定的中间件和路由
-// 它也实现了 IRouter 接口,允许嵌套分组
+// 它也实现了 Router 接口,允许嵌套分组
 type RouterGroup struct {
 	Handlers HandlersChain // 组中间件,仅应用于当前组及其子组的路由
 	basePath string        // 组路径前缀
@@ -633,7 +769,7 @@ type RouterGroup struct {
 
 // Use 将中间件应用于当前路由组
 // 这些中间件将应用于当前组及其子组的所有路由
-func (group *RouterGroup) Use(middleware ...HandlerFunc) IRouter {
+func (group *RouterGroup) Use(middleware ...HandlerFunc) Router {
 	group.Handlers = append(group.Handlers, middleware...)
 	return group
 }
@@ -679,7 +815,7 @@ func (group *RouterGroup) ANY(relativePath string, handlers ...HandlerFunc) {
 }
 
 // Group 为当前组创建一个新的子组
-func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) IRouter {
+func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) Router {
 	return &RouterGroup{
 		Handlers: group.engine.combineHandlers(group.Handlers, handlers),
 		basePath: resolveRoutePath(group.basePath, relativePath),
@@ -704,8 +840,13 @@ func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // handleRequest 负责根据请求查找路由并执行相应的处理函数链
 // 这是路由查找和执行的核心逻辑
 func (engine *Engine) handleRequest(c *Context) {
+	if isGeneralOptionsRequest(c.Request) {
+		engine.handleGeneralOptions(c)
+		return
+	}
+
 	httpMethod := c.Request.Method
-	requestPath := c.Request.URL.Path
+	requestPath := routeLookupPath(c.Request)
 
 	// 查找对应的路由树的根节点
 	rootNode := engine.methodTrees.get(httpMethod) // 这里获取到的 rootNode 已经是 *node 类型
@@ -725,7 +866,7 @@ func (engine *Engine) handleRequest(c *Context) {
 		}
 
 		// 如果没有找到处理函数,检查是否需要重定向（尾部斜杠或大小写修复）
-		if httpMethod != http.MethodConnect && requestPath != "/" { // CONNECT 方法和根路径不进行重定向
+		if httpMethod != http.MethodConnect && requestPath != "/" && !isGeneralOptionsRequest(c.Request) { // CONNECT 方法、服务器级 OPTIONS 和根路径不进行重定向
 			if value.tsr && engine.RedirectTrailingSlash {
 				// 尾部斜杠重定向：/foo/ -> /foo 或 /foo -> /foo/
 				redirectPath := requestPath
@@ -737,49 +878,96 @@ func (engine *Engine) handleRequest(c *Context) {
 				c.Redirect(http.StatusMovedPermanently, redirectPath) // 301 永久重定向
 				return
 			}
-			// 尝试不区分大小写的查找
-			// 直接在 rootNode 上调用 findCaseInsensitivePath 方法
-			ciPath, found := rootNode.findCaseInsensitivePath(requestPath, engine.RedirectTrailingSlash)
-			if found && engine.RedirectFixedPath {
-				c.Redirect(http.StatusMovedPermanently, BytesToString(ciPath)) // 301 永久重定向到修正后的路径
-				return
+			if engine.RedirectFixedPath && shouldTryFixedPathLookup(requestPath, rootNode) {
+				// 仅在启用固定路径重定向时执行大小写修复查找, 避免无意义的二次树遍历.
+				ciPath, found := rootNode.findCaseInsensitivePathWithBuffer(requestPath, c.fixedPathBuf, engine.RedirectTrailingSlash)
+				if found {
+					c.fixedPathBuf = ciPath[:0]
+					c.Redirect(http.StatusMovedPermanently, string(ciPath)) // 301 永久重定向到修正后的路径
+					return
+				}
+				c.fixedPathBuf = c.fixedPathBuf[:0]
 			}
 		}
 	}
 
-	// 构建处理链
-	// 组合全局中间件和路由处理函数
-	handlers := engine.globalHandlers
-
-	// 如果启用了 MethodNotAllowed 处理,并且没有找到精确匹配的路由
-	// 则在全局中间件之后添加 MethodNotAllowed 处理器
-	if engine.HandleMethodNotAllowed {
-		handlers = append(handlers, MethodNotAllowed())
-	}
-
-	// 如果启用了 UnMatchFS 处理,并且没有找到精确匹配的路由和 MethodNotAllowed
-	// 则在处理链的最后添加 UnMatchFS 处理器
 	if engine.unMatchFS.ServeUnmatchedAsFS {
-		/*
-			var unMatchFSHandle = c.engine.unMatchFileServer
-			handlers = append(handlers, unMatchFSHandle)
-		*/
-		handlers = append(handlers, engine.UnMatchFSRoutes...)
+		c.handlers = engine.unmatchedFSChain
+	} else {
+		c.handlers = engine.notFoundChain
 	}
-
-	// 如果用户设置了 NoRoute 处理器,且没有匹配到任何路由、MethodNotAllowed 或 UnMatchFS
-	// 则在处理链的最后添加 NoRoute 处理器
-	if engine.noRoute != nil {
-		handlers = append(handlers, engine.noRoute)
-	} else if len(engine.noRoutes) > 0 {
-		handlers = append(handlers, engine.noRoutes...)
-	}
-
-	handlers = append(handlers, NotFound())
-
-	c.handlers = handlers
 	c.Next() // 执行处理函数链
 	//c.Writer.Flush() // 确保所有缓冲的响应数据被发送
+}
+
+func routeLookupPath(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+
+	if req.Method == http.MethodConnect && req.RequestURI != "" && req.RequestURI != "*" && !strings.HasPrefix(req.RequestURI, "/") && !strings.Contains(req.RequestURI, "://") {
+		return "/" + req.RequestURI
+	}
+	if isGeneralOptionsRequest(req) {
+		return ""
+	}
+	if req.URL == nil {
+		return ""
+	}
+	return req.URL.Path
+}
+
+func isGeneralOptionsRequest(req *http.Request) bool {
+	return req != nil && req.Method == http.MethodOptions && req.RequestURI == "*"
+}
+
+func shouldTryFixedPathLookup(path string, root *node) bool {
+	if root != nil && root.hasCaseInsensitivePath {
+		return true
+	}
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c >= utf8.RuneSelf {
+			return true
+		}
+		if c >= 'A' && c <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func (engine *Engine) allowedMethodsForPath(requestPath string, allowedMethods []string) []string {
+	if cap(allowedMethods) < len(engine.methodTrees) {
+		allowedMethods = make([]string, 0, len(engine.methodTrees))
+	} else {
+		allowedMethods = allowedMethods[:0]
+	}
+	tempSkippedNodes := GetTempSkippedNodes()
+	for _, treeIter := range engine.methodTrees {
+		// 注意这里 treeIter.root 才是正确的,因为 treeIter 是 methodTree 类型
+		*tempSkippedNodes = (*tempSkippedNodes)[:0]
+		value := treeIter.root.getValue(requestPath, nil, tempSkippedNodes, false)
+		if value.handlers != nil {
+			allowedMethods = append(allowedMethods, treeIter.method)
+		}
+	}
+	PutTempSkippedNodes(tempSkippedNodes)
+	return allowedMethods
+}
+
+func (engine *Engine) handleGeneralOptions(c *Context) {
+	if c == nil || c.Request == nil {
+		return
+	}
+
+	c.Writer.Header().Set("Content-Length", "0")
+	if c.Request.ContentLength != 0 {
+		mb := http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
+		_, _ = io.Copy(io.Discard, mb)
+	}
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Abort()
 }
 
 // Context 返回 Engine 的根上下文, 该上下文在服务器优雅关闭时会被取消.

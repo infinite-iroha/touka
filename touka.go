@@ -22,10 +22,10 @@ type HandlerFunc func(*Context)
 // HandlersChain 定义处理函数链（中间件栈）的类型。
 type HandlersChain []HandlerFunc
 
-// IRouter 定义了路由注册的接口，提供路由分组和HTTP方法注册的能力。
-type IRouter interface {
-	Group(relativePath string, handlers ...HandlerFunc) IRouter // 创建路由分组
-	Use(middleware ...HandlerFunc) IRouter                      // 应用中间件到当前组或子组
+// Router 定义了路由注册的接口，提供路由分组和HTTP方法注册的能力。
+type Router interface {
+	Group(relativePath string, handlers ...HandlerFunc) Router // 创建路由分组
+	Use(middleware ...HandlerFunc) Router                      // 应用中间件到当前组或子组
 
 	Handle(httpMethod, relativePath string, handlers ...HandlerFunc) // 注册通用HTTP方法
 	GET(relativePath string, handlers ...HandlerFunc)

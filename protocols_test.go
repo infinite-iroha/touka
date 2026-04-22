@@ -70,42 +70,25 @@ func TestApplyDefaultServerConfig(t *testing.T) {
 	}
 }
 
-func TestRunTLSProtocolInheritance(t *testing.T) {
+func TestTLSRunDefaultsProtocolInheritance(t *testing.T) {
 	engine := New()
 
-	// 模拟 RunTLS 中的逻辑: 如果使用默认协议, 则启用 HTTP/2
-	if engine.useDefaultProtocols {
-		engine.setProtocols(&ProtocolsConfig{
-			Http1: true,
-			Http2: true,
-		})
-	}
-
-	srv := &http.Server{TLSConfig: &tls.Config{}}
-	engine.applyDefaultServerConfig(srv)
+	srv := buildMainServer(engine, runConfig{addr: ":443", mode: runModeHTTPS, tlsConfig: &tls.Config{}})
 
 	if !srv.Protocols.HTTP2() {
-		t.Error("RunTLS simulation: Expected HTTP/2 to be enabled for default config")
+		t.Error("TLS run defaults: expected HTTP/2 to be enabled for default config")
 	}
 
-	// 模拟用户设置了自定义协议后调用 RunTLS
+	// 模拟用户设置了自定义协议后进入 TLS 运行模式
 	engine = New()
 	engine.SetProtocols(&ProtocolsConfig{
 		Http1: true,
 		Http2: false, // 用户明确不想要 HTTP/2
 	})
 
-	if engine.useDefaultProtocols {
-		engine.setProtocols(&ProtocolsConfig{
-			Http1: true,
-			Http2: true,
-		})
-	}
-
-	srv2 := &http.Server{TLSConfig: &tls.Config{}}
-	engine.applyDefaultServerConfig(srv2)
+	srv2 := buildMainServer(engine, runConfig{addr: ":443", mode: runModeHTTPS, tlsConfig: &tls.Config{}})
 
 	if srv2.Protocols.HTTP2() {
-		t.Error("RunTLS simulation: Expected HTTP/2 to be DISABLED if user set custom protocols previously")
+		t.Error("TLS run defaults: expected HTTP/2 to remain disabled when user set custom protocols")
 	}
 }

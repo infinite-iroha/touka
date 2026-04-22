@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,329 +22,322 @@ import (
 	"github.com/fenthope/reco"
 )
 
-// defaultShutdownTimeout 定义了在强制关闭前等待优雅关闭的最长时间
 const defaultShutdownTimeout = 5 * time.Second
 
-// --- 内部辅助函数 ---
+type runMode uint8
 
-// resolveAddress 解析传入的地址参数,如果没有则返回默认的 ":8080"
-func resolveAddress(addr []string) string {
-	switch len(addr) {
-	case 0:
-		return ":8080"
-	case 1:
-		return addr[0]
-	default:
-		panic("too many parameters provided for server address")
+const (
+	runModeHTTP runMode = iota
+	runModeHTTPS
+	runModeHTTPSRedirect
+)
+
+type runConfig struct {
+	addr                string
+	httpRedirectAddr    string
+	tlsConfig           *tls.Config
+	redirectHost        string
+	redirectHostHeaders []string
+	useHeaderHost       bool
+	useHeaderHostSet    bool
+	graceful            bool
+	shutdownTimeout     time.Duration
+	gracefulCtx         context.Context
+	mode                runMode
+	shutdownDefaultSet  bool
+	shutdownTimeoutSet  bool
+}
+
+type RunOption interface {
+	apply(*runConfig) error
+}
+
+type runOptionFunc func(*runConfig) error
+
+func (f runOptionFunc) apply(cfg *runConfig) error {
+	return f(cfg)
+}
+
+func defaultRunConfig() runConfig {
+	return runConfig{
+		addr:            ":8080",
+		shutdownTimeout: defaultShutdownTimeout,
+		mode:            runModeHTTP,
+		useHeaderHost:   true,
 	}
 }
 
-// getShutdownTimeout 解析可选的超时参数,如果无效或未提供则返回默认值
-func getShutdownTimeout(timeouts []time.Duration) time.Duration {
-	if len(timeouts) > 0 && timeouts[0] > 0 {
-		return timeouts[0]
-	}
-	return defaultShutdownTimeout
+type HTTPRedirectOption interface {
+	applyRedirect(*runConfig) error
 }
 
-// runServer 是一个内部辅助函数,负责在一个新的 goroutine 中启动一个 http.Server,
-// 并处理其启动失败的致命错误
-// serverType 用于在日志中标识服务器类型 (例如 "HTTP", "HTTPS")
-func runServer(serverType string, srv *http.Server) {
+type redirectOptionFunc func(*runConfig) error
+
+func (f redirectOptionFunc) applyRedirect(cfg *runConfig) error {
+	return f(cfg)
+}
+
+func WithAddr(addr string) RunOption {
+	return runOptionFunc(func(cfg *runConfig) error {
+		if addr == "" {
+			return errors.New("run address must not be empty")
+		}
+		cfg.addr = addr
+		return nil
+	})
+}
+
+func WithTLS(tlsConfig *tls.Config) RunOption {
+	return runOptionFunc(func(cfg *runConfig) error {
+		if tlsConfig == nil {
+			return errors.New("tls.Config must not be nil")
+		}
+		cfg.tlsConfig = tlsConfig
+		if cfg.mode == runModeHTTP {
+			cfg.mode = runModeHTTPS
+		}
+		return nil
+	})
+}
+
+func WithHTTPRedirect(addr string, opts ...HTTPRedirectOption) RunOption {
+	return runOptionFunc(func(cfg *runConfig) error {
+		if addr == "" {
+			return errors.New("http redirect address must not be empty")
+		}
+		cfg.httpRedirectAddr = addr
+		cfg.mode = runModeHTTPSRedirect
+		for _, opt := range opts {
+			if opt == nil {
+				continue
+			}
+			if err := opt.applyRedirect(cfg); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func WithUseHeaderHost(enabled bool) HTTPRedirectOption {
+	return redirectOptionFunc(func(cfg *runConfig) error {
+		cfg.useHeaderHost = enabled
+		cfg.useHeaderHostSet = true
+		return nil
+	})
+}
+
+func WithRedirectHost(host string) HTTPRedirectOption {
+	return redirectOptionFunc(func(cfg *runConfig) error {
+		if host == "" {
+			return errors.New("redirect host must not be empty")
+		}
+		cfg.redirectHost = host
+		return nil
+	})
+}
+
+func WithRedirectHostHeaders(headers []string) HTTPRedirectOption {
+	return redirectOptionFunc(func(cfg *runConfig) error {
+		cfg.redirectHostHeaders = cfg.redirectHostHeaders[:0]
+		for _, header := range headers {
+			trimmed := http.CanonicalHeaderKey(strings.TrimSpace(header))
+			if trimmed != "" {
+				cfg.redirectHostHeaders = append(cfg.redirectHostHeaders, trimmed)
+			}
+		}
+		return nil
+	})
+}
+
+func WithGracefulShutdown(timeout time.Duration) RunOption {
+	return runOptionFunc(func(cfg *runConfig) error {
+		cfg.graceful = true
+		cfg.shutdownTimeoutSet = true
+		if timeout > 0 {
+			cfg.shutdownTimeout = timeout
+		} else {
+			cfg.shutdownTimeout = defaultShutdownTimeout
+		}
+		return nil
+	})
+}
+
+func WithGracefulShutdownDefault() RunOption {
+	return runOptionFunc(func(cfg *runConfig) error {
+		cfg.graceful = true
+		cfg.shutdownDefaultSet = true
+		cfg.shutdownTimeout = defaultShutdownTimeout
+		return nil
+	})
+}
+
+func WithShutdownContext(ctx context.Context) RunOption {
+	return runOptionFunc(func(cfg *runConfig) error {
+		if ctx == nil {
+			return errors.New("shutdown context must not be nil")
+		}
+		cfg.gracefulCtx = ctx
+		return nil
+	})
+}
+
+func serveServer(srv *http.Server, serveTLS bool) error {
+	if serveTLS {
+		return srv.ListenAndServeTLS("", "")
+	}
+	return srv.ListenAndServe()
+}
+
+func runServer(serverType string, srv *http.Server, serveTLS bool) {
 	go func() {
-		var err error
 		protocol := "http"
-		if srv.TLSConfig != nil {
+		if serveTLS {
 			protocol = "https"
 		}
 
 		log.Printf("Touka %s server listening on %s://%s", serverType, protocol, srv.Addr)
 
-		if srv.TLSConfig != nil {
-			// 对于 HTTPS 服务器,如果 srv.TLSConfig.Certificates 已配置,
-			// ListenAndServeTLS 的前两个参数可以为空字符串
-			err = srv.ListenAndServeTLS("", "")
-		} else {
-			err = srv.ListenAndServe()
-		}
-
-		// 如果服务器停止不是因为被优雅关闭 (http.ErrServerClosed),
-		// 则认为是一个严重错误,并终止程序
+		err := serveServer(srv, serveTLS)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("Touka %s server failed: %v", serverType, err)
 		}
 	}()
 }
 
-// handleGracefulShutdown 监听系统信号 (SIGINT, SIGTERM) 并优雅地关闭所有提供的服务器
-// 这是所有支持优雅关闭的 RunXXX 方法的最终归宿
-func handleGracefulShutdown(servers []*http.Server, timeout time.Duration, logger *reco.Logger) error {
-	// 创建一个 channel 来接收操作系统信号
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM) // 监听中断和终止信号
-	<-quit                                               // 阻塞,直到接收到上述信号之一
-	log.Println("Shutting down Touka server(s)...")
-
-	// 关闭日志记录器
-	if logger != nil {
-		go func() {
-			log.Println("Closing Touka logger...")
-			CloseLogger(logger)
-		}()
+func cloneTLSConfig(tlsConfig *tls.Config) *tls.Config {
+	if tlsConfig == nil {
+		return nil
 	}
-
-	// 创建一个带超时的上下文,用于 Shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(servers)) // 用于收集关闭错误的 channel
-
-	// 并发地关闭所有服务器
-	for _, srv := range servers {
-		wg.Add(1)
-		go func(s *http.Server) {
-			defer wg.Done()
-			if err := s.Shutdown(ctx); err != nil {
-				// 将错误发送到 channel
-				errChan <- fmt.Errorf("server on %s shutdown failed: %w", s.Addr, err)
-			}
-		}(srv)
-	}
-
-	wg.Wait()      // 等待所有服务器的关闭 goroutine 完成
-	close(errChan) // 关闭 channel,以便可以安全地遍历它
-
-	// 收集所有关闭过程中发生的错误
-	var shutdownErrors []error
-	for err := range errChan {
-		shutdownErrors = append(shutdownErrors, err)
-		log.Printf("Shutdown error: %v", err)
-	}
-
-	if len(shutdownErrors) > 0 {
-		return errors.Join(shutdownErrors...) // Go 1.20+ 的 errors.Join,用于合并多个错误
-	}
-	log.Println("Touka server(s) exited gracefully.")
-	return nil
+	return tlsConfig.Clone()
 }
 
-func handleGracefulShutdownWithContext(servers []*http.Server, ctx context.Context, timeout time.Duration, logger *reco.Logger) error {
-	// 创建一个 channel 来接收操作系统信号
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM) // 监听中断和终止信号
-
-	// 启动服务器
-	serverStopped := make(chan error, 1)
-	for _, srv := range servers {
-		go func(s *http.Server) {
-			serverStopped <- s.ListenAndServe()
-		}(srv)
+func parseHTTPSPort(addr string) (string, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("https address %q must include a port: %w", addr, err)
 	}
+	return port, nil
+}
 
-	select {
-	case <-ctx.Done():
-		// Context 被取消 (例如,通过外部取消函数)
-		log.Println("Context cancelled, shutting down Touka server(s)...")
-	case err := <-serverStopped:
-		// 服务器自身停止 (例如,端口被占用,或 ListenAndServe 返回错误)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("Touka HTTP server failed: %w", err)
+func applyMainServerConfig(engine *Engine, srv *http.Server, serveTLS bool) {
+	if serveTLS {
+		if engine.TLSServerConfigurator != nil {
+			engine.TLSServerConfigurator(srv)
+			return
 		}
-		log.Println("Touka HTTP server stopped gracefully.")
-		return nil // 服务器已自行优雅关闭,无需进一步处理
-	case <-quit:
-		// 接收到操作系统信号
-		log.Println("Shutting down Touka server(s) due to OS signal...")
 	}
-
-	// 关闭日志记录器
-	if logger != nil {
-		go func() {
-			log.Println("Closing Touka logger...")
-			CloseLogger(logger)
-		}()
-	}
-
-	// 创建一个带超时的上下文,用于 Shutdown
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(servers)) // 用于收集关闭错误的 channel
-
-	// 并发地关闭所有服务器
-	for _, srv := range servers {
-		wg.Add(1)
-		go func(s *http.Server) {
-			defer wg.Done()
-			if err := s.Shutdown(shutdownCtx); err != nil {
-				// 将错误发送到 channel
-				errChan <- fmt.Errorf("server on %s shutdown failed: %w", s.Addr, err)
-			}
-		}(srv)
-	}
-
-	wg.Wait()
-	close(errChan) // 关闭 channel,以便可以安全地遍历它
-
-	// 收集所有关闭过程中发生的错误
-	var shutdownErrors []error
-	for err := range errChan {
-		shutdownErrors = append(shutdownErrors, err)
-		log.Printf("Shutdown error: %v", err)
-	}
-
-	if len(shutdownErrors) > 0 {
-		return errors.Join(shutdownErrors...) // Go 1.20+ 的 errors.Join,用于合并多个错误
-	}
-	log.Println("Touka server(s) exited gracefully.")
-	return nil
-}
-
-// --- 公共 Run 方法 ---
-
-// Run 启动一个不支持优雅关闭的 HTTP 服务器
-// 这是一个阻塞调用,主要用于简单的场景或快速测试
-// 建议在生产环境中使用 RunShutdown 或其他支持优雅关闭的方法
-func (engine *Engine) Run(addr ...string) error {
-	address := resolveAddress(addr)
-	srv := &http.Server{Addr: address, Handler: engine}
-
-	// 即使是不支持优雅关闭的 Run,也应用默认和用户配置,以保持行为一致性
-	engine.applyDefaultServerConfig(srv)
 	if engine.ServerConfigurator != nil {
 		engine.ServerConfigurator(srv)
 	}
-	log.Printf("Starting Touka HTTP server on %s (no graceful shutdown)", address)
-	return srv.ListenAndServe()
 }
 
-// RunShutdown 启动一个支持优雅关闭的 HTTP 服务器
-func (engine *Engine) RunShutdown(addr string, timeouts ...time.Duration) error {
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: engine,
-		BaseContext: func(l net.Listener) context.Context {
-			return engine.shutdownCtx
-		},
-	}
-	srv.RegisterOnShutdown(engine.shutdownCancel)
-
-	// 应用框架的默认配置和用户提供的自定义配置
-	engine.applyDefaultServerConfig(srv)
+func applyRedirectServerConfig(engine *Engine, srv *http.Server) {
+	applyServerProtocols(srv, engine.serverProtocols)
 	if engine.ServerConfigurator != nil {
 		engine.ServerConfigurator(srv)
 	}
-
-	runServer("HTTP", srv)
-	return handleGracefulShutdown([]*http.Server{srv}, getShutdownTimeout(timeouts), engine.LogReco)
 }
 
-// RunShutdown 启动一个支持优雅关闭的 HTTP 服务器
-func (engine *Engine) RunShutdownWithContext(addr string, ctx context.Context, timeouts ...time.Duration) error {
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: engine,
-		BaseContext: func(l net.Listener) context.Context {
-			return engine.shutdownCtx
-		},
+func effectiveServerProtocols(engine *Engine, serveTLS bool) *http.Protocols {
+	if engine == nil {
+		return nil
 	}
-	srv.RegisterOnShutdown(engine.shutdownCancel)
-
-	// 应用框架的默认配置和用户提供的自定义配置
-	engine.applyDefaultServerConfig(srv)
-	if engine.ServerConfigurator != nil {
-		engine.ServerConfigurator(srv)
+	if serveTLS && engine.useDefaultProtocols {
+		protocols := &http.Protocols{}
+		protocols.SetHTTP1(true)
+		protocols.SetHTTP2(true)
+		return protocols
 	}
-
-	return handleGracefulShutdownWithContext([]*http.Server{srv}, ctx, getShutdownTimeout(timeouts), engine.LogReco)
+	return cloneServerProtocols(engine.serverProtocols)
 }
 
-// RunTLS 启动一个支持优雅关闭的 HTTPS 服务器
-func (engine *Engine) RunTLS(addr string, tlsConfig *tls.Config, timeouts ...time.Duration) error {
-	if tlsConfig == nil {
-		return errors.New("tls.Config must not be nil for RunTLS")
-	}
-
-	// 配置 HTTP/2 支持 (如果使用默认配置)
-	if engine.useDefaultProtocols {
-		engine.setProtocols(&ProtocolsConfig{
-			Http1: true,
-			Http2: true, // 默认在 TLS 上启用 HTTP/2
-		})
-	}
-
-	srv := &http.Server{
-		Addr:      addr,
+func buildMainServer(engine *Engine, cfg runConfig) *http.Server {
+	serveTLS := cfg.mode != runModeHTTP
+	server := &http.Server{
+		Addr:      cfg.addr,
 		Handler:   engine,
-		TLSConfig: tlsConfig,
-		BaseContext: func(l net.Listener) context.Context {
+		TLSConfig: cloneTLSConfig(cfg.tlsConfig),
+	}
+	if cfg.graceful {
+		server.BaseContext = func(net.Listener) context.Context {
 			return engine.shutdownCtx
-		},
+		}
+		server.RegisterOnShutdown(engine.shutdownCancel)
 	}
-	srv.RegisterOnShutdown(engine.shutdownCancel)
-
-	// 应用框架的默认配置和用户提供的自定义配置
-	// 优先使用 TLSServerConfigurator,如果未设置,则回退到通用的 ServerConfigurator
-	engine.applyDefaultServerConfig(srv)
-	if engine.TLSServerConfigurator != nil {
-		engine.TLSServerConfigurator(srv)
-	} else if engine.ServerConfigurator != nil {
-		engine.ServerConfigurator(srv)
-	}
-
-	runServer("HTTPS", srv)
-	return handleGracefulShutdown([]*http.Server{srv}, getShutdownTimeout(timeouts), engine.LogReco)
+	applyServerProtocols(server, effectiveServerProtocols(engine, serveTLS))
+	applyMainServerConfig(engine, server, serveTLS)
+	return server
 }
 
-// RunWithTLS 是 RunTLS 的别名,为了保持向后兼容性或更直观的命名
-func (engine *Engine) RunWithTLS(addr string, tlsConfig *tls.Config, timeouts ...time.Duration) error {
-	return engine.RunTLS(addr, tlsConfig, timeouts...)
+func firstRedirectHeaderHost(r *http.Request, headers []string) string {
+	if r == nil {
+		return ""
+	}
+	for _, header := range headers {
+		value := strings.TrimSpace(r.Header.Get(header))
+		if value == "" {
+			continue
+		}
+		if comma := strings.IndexByte(value, ','); comma >= 0 {
+			value = strings.TrimSpace(value[:comma])
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
-// RunTLSRedir 启动 HTTP 重定向服务器和 HTTPS 应用服务器,两者都支持优雅关闭
-func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Config, timeouts ...time.Duration) error {
-	if tlsConfig == nil {
-		return errors.New("tls.Config must not be nil for RunTLSRedir")
+func redirectTargetHost(r *http.Request, cfg runConfig) (string, int, bool) {
+	if cfg.useHeaderHostSet && !cfg.useHeaderHost {
+		if cfg.redirectHost == "" {
+			return "", http.StatusInternalServerError, false
+		}
+		return cfg.redirectHost, 0, true
 	}
 
-	// --- HTTPS 服务器 ---
-	if engine.useDefaultProtocols {
-		engine.setProtocols(&ProtocolsConfig{Http1: true, Http2: true})
-	}
-	httpsSrv := &http.Server{
-		Addr:      httpsAddr,
-		Handler:   engine,
-		TLSConfig: tlsConfig,
-		BaseContext: func(l net.Listener) context.Context {
-			return engine.shutdownCtx
-		},
-	}
-	httpsSrv.RegisterOnShutdown(engine.shutdownCancel)
-	engine.applyDefaultServerConfig(httpsSrv)
-	if engine.TLSServerConfigurator != nil {
-		engine.TLSServerConfigurator(httpsSrv)
-	} else if engine.ServerConfigurator != nil {
-		engine.ServerConfigurator(httpsSrv)
+	if len(cfg.redirectHostHeaders) > 0 {
+		host := firstRedirectHeaderHost(r, cfg.redirectHostHeaders)
+		if host == "" {
+			return "", http.StatusUpgradeRequired, false
+		}
+		return host, 0, true
 	}
 
-	// --- HTTP 重定向服务器 ---
+	if r == nil {
+		return "", http.StatusUpgradeRequired, false
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return "", http.StatusUpgradeRequired, false
+	}
+	return host, 0, true
+}
+
+func buildRedirectServer(engine *Engine, cfg runConfig) (*http.Server, error) {
+	httpsAddr := cfg.addr
+	httpAddr := cfg.httpRedirectAddr
+	httpsPort, err := parseHTTPSPort(httpsAddr)
+	if err != nil {
+		return nil, err
+	}
+
 	redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			host = r.Host
+		host, statusCode, ok := redirectTargetHost(r, cfg)
+		if !ok {
+			http.Error(w, http.StatusText(statusCode), statusCode)
+			return
 		}
 
-		_, httpsPort, err := net.SplitHostPort(httpsAddr)
-		if err != nil {
-			// 如果 httpsAddr 没有端口,这是一个配置错误
-
-			log.Fatalf("Invalid HTTPS address for redirection '%s': must include a port.", httpsAddr)
+		if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+			host = parsedHost
+			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+				host = "[" + host + "]"
+			}
 		}
 
 		targetURL := "https://" + host
-		// 只有在非标准 HTTPS 端口 (443) 时才附加端口号
 		if httpsPort != "443" {
 			targetURL = "https://" + net.JoinHostPort(host, httpsPort)
 		}
@@ -351,22 +345,205 @@ func (engine *Engine) RunTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Con
 
 		http.Redirect(w, r, targetURL, http.StatusMovedPermanently)
 	})
-	httpSrv := &http.Server{
-		Addr:    httpAddr,
-		Handler: redirectHandler,
-	}
-	engine.applyDefaultServerConfig(httpSrv)
-	if engine.ServerConfigurator != nil {
-		engine.ServerConfigurator(httpSrv)
-	}
 
-	// --- 启动服务器和优雅关闭 ---
-	runServer("HTTPS", httpsSrv)
-	runServer("HTTP Redirect", httpSrv)
-	return handleGracefulShutdown([]*http.Server{httpsSrv, httpSrv}, getShutdownTimeout(timeouts), engine.LogReco)
+	server := &http.Server{Addr: httpAddr, Handler: redirectHandler}
+	applyRedirectServerConfig(engine, server)
+	return server, nil
 }
 
-// RunWithTLSRedir 是 RunTLSRedir 的别名,为了保持向后兼容性
-func (engine *Engine) RunWithTLSRedir(httpAddr, httpsAddr string, tlsConfig *tls.Config, timeouts ...time.Duration) error {
-	return engine.RunTLSRedir(httpAddr, httpsAddr, tlsConfig, timeouts...)
+func validateRunConfig(cfg runConfig) error {
+	if cfg.mode == runModeHTTPSRedirect && cfg.tlsConfig == nil {
+		return errors.New("WithHTTPRedirect requires WithTLS")
+	}
+	if cfg.mode == runModeHTTPS && cfg.tlsConfig == nil {
+		return errors.New("https mode requires WithTLS")
+	}
+	if cfg.gracefulCtx != nil && !cfg.graceful {
+		return errors.New("WithShutdownContext requires graceful shutdown")
+	}
+	if len(cfg.redirectHostHeaders) > 0 {
+		if !cfg.useHeaderHostSet || !cfg.useHeaderHost {
+			return errors.New("WithRedirectHostHeaders requires WithUseHeaderHost(true)")
+		}
+	}
+	if cfg.useHeaderHostSet && cfg.useHeaderHost {
+		if cfg.redirectHost != "" {
+			return errors.New("WithRedirectHost cannot be used when WithUseHeaderHost(true)")
+		}
+	} else if cfg.useHeaderHostSet && !cfg.useHeaderHost {
+		if cfg.redirectHost == "" {
+			return errors.New("WithUseHeaderHost(false) requires WithRedirectHost")
+		}
+		if len(cfg.redirectHostHeaders) > 0 {
+			return errors.New("WithRedirectHostHeaders cannot be used when WithUseHeaderHost(false)")
+		}
+	}
+	return nil
+}
+
+func effectiveShutdownTimeout(cfg runConfig) time.Duration {
+	if cfg.shutdownTimeoutSet || cfg.shutdownDefaultSet {
+		if cfg.shutdownTimeout > 0 {
+			return cfg.shutdownTimeout
+		}
+	}
+	return defaultShutdownTimeout
+}
+
+func closeLoggerAsync(logger *reco.Logger) {
+	if logger == nil {
+		return
+	}
+	go func() {
+		log.Println("Closing Touka logger...")
+		CloseLogger(logger)
+	}()
+}
+
+func shutdownServers(servers []*http.Server, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(servers))
+	for _, srv := range servers {
+		wg.Add(1)
+		go func(s *http.Server) {
+			defer wg.Done()
+			if err := s.Shutdown(ctx); err != nil {
+				errChan <- fmt.Errorf("server on %s shutdown failed: %w", s.Addr, err)
+			}
+		}(srv)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	var shutdownErrors []error
+	for err := range errChan {
+		shutdownErrors = append(shutdownErrors, err)
+		log.Printf("Shutdown error: %v", err)
+	}
+	if len(shutdownErrors) > 0 {
+		return errors.Join(shutdownErrors...)
+	}
+	return nil
+}
+
+func gracefulServe(servers []*http.Server, serveTLS []bool, timeout time.Duration, logger *reco.Logger, shutdownCtx context.Context) error {
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
+	serverStopped := make(chan error, len(servers))
+	for i, srv := range servers {
+		serveTLSFlag := serveTLS[i]
+		go func(server *http.Server, useTLS bool) {
+			serverStopped <- serveServer(server, useTLS)
+		}(srv, serveTLSFlag)
+	}
+
+	select {
+	case err := <-serverStopped:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if shutdownErr := shutdownServers(servers, timeout); shutdownErr != nil {
+				return errors.Join(err, shutdownErr)
+			}
+			return err
+		}
+		log.Println("Touka server stopped gracefully.")
+		return nil
+	case <-quit:
+		log.Println("Shutting down Touka server(s) due to OS signal...")
+	case <-shutdownCtx.Done():
+		log.Println("Context cancelled, shutting down Touka server(s)...")
+	}
+
+	closeLoggerAsync(logger)
+	if err := shutdownServers(servers, timeout); err != nil {
+		return err
+	}
+	log.Println("Touka server(s) exited gracefully.")
+	return nil
+}
+
+// Run starts the engine with the provided startup options.
+//
+// Default behavior with no options:
+//   - HTTP only
+//   - listens on :8080
+//   - no graceful shutdown orchestration
+//
+// Add WithGracefulShutdown(...) or WithGracefulShutdownDefault() to enable
+// signal-aware graceful shutdown and request-context cancellation semantics.
+// Add WithTLS(...) to run HTTPS; this is independent from graceful shutdown.
+func (engine *Engine) Run(opts ...RunOption) error {
+	cfg := defaultRunConfig()
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt.apply(&cfg); err != nil {
+			return err
+		}
+	}
+	if cfg.httpRedirectAddr != "" {
+		cfg.mode = runModeHTTPSRedirect
+	} else if cfg.tlsConfig != nil {
+		cfg.mode = runModeHTTPS
+	}
+	if err := validateRunConfig(cfg); err != nil {
+		return err
+	}
+
+	serveTLS := cfg.mode != runModeHTTP
+
+	mainServer := buildMainServer(engine, cfg)
+	servers := []*http.Server{mainServer}
+	serveTLSFlags := []bool{serveTLS}
+	if cfg.mode == runModeHTTPSRedirect {
+		redirectServer, err := buildRedirectServer(engine, cfg)
+		if err != nil {
+			return err
+		}
+		servers = append(servers, redirectServer)
+		serveTLSFlags = append(serveTLSFlags, false)
+	}
+
+	if !cfg.graceful {
+		if len(servers) > 1 {
+			serverStopped := make(chan error, len(servers))
+			for i, srv := range servers {
+				serveTLSFlag := serveTLSFlags[i]
+				go func(server *http.Server, useTLS bool) {
+					serverStopped <- serveServer(server, useTLS)
+				}(srv, serveTLSFlag)
+			}
+
+			err := <-serverStopped
+			if shutdownErr := shutdownServers(servers, defaultShutdownTimeout); shutdownErr != nil {
+				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+					return errors.Join(err, shutdownErr)
+				}
+				return shutdownErr
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
+		}
+
+		protocolLabel := "HTTP"
+		if serveTLS {
+			protocolLabel = "HTTPS"
+		}
+		log.Printf("Starting Touka %s server on %s", protocolLabel, cfg.addr)
+		return serveServer(mainServer, serveTLS)
+	}
+
+	shutdownCtx := context.Background()
+	if cfg.gracefulCtx != nil {
+		shutdownCtx = cfg.gracefulCtx
+	}
+	return gracefulServe(servers, serveTLSFlags, effectiveShutdownTimeout(cfg), engine.LogReco, shutdownCtx)
 }
