@@ -44,7 +44,7 @@ func (c *Context) GetLoggerReco() *reco.Logger {
 // --- httpc 兼容函数 ---
 
 // GetHTTPC 返回底层的 httpc.Client 实例
-// Deprecated: 使用 HTTPClient() 替代，新方法会自动关联请求 Context
+// Deprecated: 使用 HTTPC() 替代，新方法会自动关联请求 Context
 //
 //go:fix inline
 func (c *Context) GetHTTPC() *httpc.Client {
