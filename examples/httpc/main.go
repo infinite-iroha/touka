@@ -21,7 +21,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, touka.H{"error": err.Error()})
 			return
 		}
-		c.String(http.StatusOK, body)
+		c.String(http.StatusOK, "%s", body)
 	})
 
 	// 示例 2：带 Header 的 POST 请求
@@ -90,7 +90,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, touka.H{"error": err.Error()})
 			return
 		}
-		c.String(http.StatusOK, body)
+		c.String(http.StatusOK, "%s", body)
 	})
 
 	fmt.Println("Server running on :8080")
