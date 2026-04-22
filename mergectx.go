@@ -6,6 +6,7 @@ package touka
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -120,15 +121,12 @@ func (mc *mergedContext) Value(key any) any {
 // orDone 返回一个 channel, 当任意一个输入 context 的 Done() channel 关闭时关闭.
 func orDone(contexts ...context.Context) <-chan struct{} {
 	done := make(chan struct{})
+	var once sync.Once
 	for _, ctx := range contexts {
 		go func(c context.Context) {
 			select {
 			case <-c.Done():
-				select {
-				case <-done:
-				default:
-					close(done)
-				}
+				once.Do(func() { close(done) })
 			case <-done:
 			}
 		}(ctx)
