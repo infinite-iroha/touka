@@ -60,14 +60,32 @@ var (
 	MethodTrace   = "TRACE"
 )
 
+var (
+	// WebDAV methods
+	MethodPropfind  = "PROPFIND"
+	MethodProppatch = "PROPPATCH"
+	MethodMkcol     = "MKCOL"
+	MethodCopy      = "COPY"
+	MethodMove      = "MOVE"
+	MethodLock      = "LOCK"
+	MethodUnlock    = "UNLOCK"
+)
+
 var MethodsSet = map[string]struct{}{
-	MethodGet:     {},
-	MethodHead:    {},
-	MethodPost:    {},
-	MethodPut:     {},
-	MethodPatch:   {},
-	MethodDelete:  {},
-	MethodConnect: {},
-	MethodOptions: {},
-	MethodTrace:   {},
+	MethodGet:       {},
+	MethodHead:      {},
+	MethodPost:      {},
+	MethodPut:       {},
+	MethodPatch:     {},
+	MethodDelete:    {},
+	MethodConnect:   {},
+	MethodOptions:   {},
+	MethodTrace:     {},
+	MethodPropfind:  {},
+	MethodProppatch: {},
+	MethodMkcol:     {},
+	MethodCopy:      {},
+	MethodMove:      {},
+	MethodLock:      {},
+	MethodUnlock:    {},
 }
