@@ -2,8 +2,8 @@ github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.3 h1:Hc1O6D50U3URkdSzfQ/SgeUU750wU
 github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.3/go.mod h1:nFQzepAwwdj5Hp5U+X19l4FVvsaOSBTW41BzfI/CkMA=
 github.com/WJQSERVER-STUDIO/httpc v0.9.3 h1:wYZkz9f/+2WuDuzPlExebvnn0q6QeArM15Y51HJ5UUI=
 github.com/WJQSERVER-STUDIO/httpc v0.9.3/go.mod h1:vtaDmN/8gN8Es1DJsGvvrFr8kErysJndu87i+KOWUHY=
-github.com/WJQSERVER/wanf v0.0.8 h1:1Ri9d7nKhu22hGxP8O9B9rXnYym6DYGKgi6WRVx3VF8=
-github.com/WJQSERVER/wanf v0.0.8/go.mod h1:R0Zw/1skEMVlQ9m5atbkmanlW+9h2bkdq7+wbPY+F/8=
+github.com/WJQSERVER/wanf v0.0.10 h1:WCRcioHJsmdmMiXmuh3aMtLWK+ymc72z4WeX03FKzac=
+github.com/WJQSERVER/wanf v0.0.10/go.mod h1:R0Zw/1skEMVlQ9m5atbkmanlW+9h2bkdq7+wbPY+F/8=
 github.com/fenthope/reco v0.0.5 h1:Z/bOunFf4LSgYP/IxG9fe2pTrIq7bPsDflflbNR5Agw=
 github.com/fenthope/reco v0.0.5/go.mod h1:nd5gMkuJHN2+2Iwwt3xy+HSqRaROauIjHNkmQWRsHyM=
 github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 h1:vymEbVwYFP/L05h5TKQxvkXoKxNvTpjxYKdF1Nlwuao=
