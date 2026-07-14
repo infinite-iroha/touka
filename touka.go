@@ -58,6 +58,7 @@ var (
 	MethodConnect = "CONNECT"
 	MethodOptions = "OPTIONS"
 	MethodTrace   = "TRACE"
+	MethodQuery   = "QUERY" // RFC 10008 - The HTTP QUERY Method
 )
 
 var MethodsSet = map[string]struct{}{
@@ -70,4 +71,5 @@ var MethodsSet = map[string]struct{}{
 	MethodConnect: {},
 	MethodOptions: {},
 	MethodTrace:   {},
+	MethodQuery:   {},
 }
