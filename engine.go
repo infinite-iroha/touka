@@ -292,7 +292,7 @@ type ProtocolsConfig struct {
 // New 创建并返回一个 Engine 实例
 func New() *Engine {
 	engine := &Engine{
-		methodTrees:            make(methodTrees, 0, 9), // 常见的HTTP方法有9个 (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE)
+		methodTrees:            make(methodTrees, 0, 10), // 常见的HTTP方法有10个 (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE, QUERY)
 		RedirectTrailingSlash:  true,
 		RedirectFixedPath:      true,
 		HandleMethodNotAllowed: true,

@@ -35,7 +35,8 @@ type Router interface {
 	PATCH(relativePath string, handlers ...HandlerFunc)
 	HEAD(relativePath string, handlers ...HandlerFunc)
 	OPTIONS(relativePath string, handlers ...HandlerFunc)
-	ANY(relativePath string, handlers ...HandlerFunc) // 注册所有HTTP方法
+	QUERY(relativePath string, handlers ...HandlerFunc) // 注册 QUERY 方法 (RFC 10008)
+	ANY(relativePath string, handlers ...HandlerFunc)   // 注册所有HTTP方法
 }
 
 // RouteInfo 包含一个已注册路由的详细信息。

@@ -2043,7 +2043,7 @@ func reverseProxyShouldCountPassiveFailure(req *http.Request, err error) bool {
 
 func reverseProxyMethodIsSafe(method string) bool {
 	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, MethodQuery:
 		return true
 	default:
 		return false
