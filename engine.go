@@ -13,13 +13,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"encoding/json/v2"
 	"net/http"
 
 	"sync"
 
 	"github.com/WJQSERVER-STUDIO/httpc"
 	"github.com/fenthope/reco"
-	"github.com/go-json-experiment/json"
 )
 
 // Last 返回链中的最后一个处理函数
