@@ -1,7 +1,7 @@
 github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.3 h1:Hc1O6D50U3URkdSzfQ/SgeUU750wUBCYhefdvAbE2Ck=
 github.com/WJQSERVER-STUDIO/go-utils/iox v0.0.3/go.mod h1:nFQzepAwwdj5Hp5U+X19l4FVvsaOSBTW41BzfI/CkMA=
-github.com/WJQSERVER-STUDIO/httpc v0.9.3 h1:wYZkz9f/+2WuDuzPlExebvnn0q6QeArM15Y51HJ5UUI=
-github.com/WJQSERVER-STUDIO/httpc v0.9.3/go.mod h1:vtaDmN/8gN8Es1DJsGvvrFr8kErysJndu87i+KOWUHY=
+github.com/WJQSERVER-STUDIO/httpc v0.10.0 h1:DewLNyc35uxHQxbNUw/m7kNCdtjSJ0JT/XhGa7+iFm4=
+github.com/WJQSERVER-STUDIO/httpc v0.10.0/go.mod h1:s9+MHolXCj1UaSIbRjRLoi2eDlfzTaJ1tUZudPxAp9A=
 github.com/WJQSERVER/wanf v0.0.10 h1:WCRcioHJsmdmMiXmuh3aMtLWK+ymc72z4WeX03FKzac=
 github.com/WJQSERVER/wanf v0.0.10/go.mod h1:R0Zw/1skEMVlQ9m5atbkmanlW+9h2bkdq7+wbPY+F/8=
 github.com/fenthope/reco v0.0.5 h1:Z/bOunFf4LSgYP/IxG9fe2pTrIq7bPsDflflbNR5Agw=
@@ -10,7 +10,7 @@ github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 h1:vymEbVw
 github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433/go.mod h1:tphK2c80bpPhMOI4v6bIc2xWywPfbqi1Z06+RcrMkDg=
 github.com/valyala/bytebufferpool v1.0.0 h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw=
 github.com/valyala/bytebufferpool v1.0.0/go.mod h1:6bBcMArwyJ5K/AmCkWv1jt77kVWyCJ6HpOuEn7z0Csc=
-golang.org/x/net v0.55.0 h1:bcvxaJn3e1U6InsFWt1JUq1aSjnRxLzT2rtD2KfkDF8=
-golang.org/x/net v0.55.0/go.mod h1:L5U2KuzuOe1lY7Z+aWVIKK6qEeJXnXV9yzGA+WCHJww=
-golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
-golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=
+golang.org/x/net v0.61.0 h1:RR+6j/BTBCrggOLugxa+66R8FvoN6MHlzDlZIbN9YFw=
+golang.org/x/net v0.61.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
+golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
+golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=

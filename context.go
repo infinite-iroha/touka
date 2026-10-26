@@ -25,8 +25,9 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json/v2"
+
 	"github.com/WJQSERVER/wanf"
-	"github.com/go-json-experiment/json"
 
 	"github.com/WJQSERVER-STUDIO/go-utils/iox"
 	"github.com/WJQSERVER-STUDIO/httpc"
