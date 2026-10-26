@@ -292,7 +292,7 @@ type ProtocolsConfig struct {
 // New 创建并返回一个 Engine 实例
 func New() *Engine {
 	engine := &Engine{
-		methodTrees:            make(methodTrees, 0, 9), // 常见的HTTP方法有9个 (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE)
+		methodTrees:            make(methodTrees, 0, 10), // 常见的HTTP方法有10个 (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE, QUERY)
 		RedirectTrailingSlash:  true,
 		RedirectFixedPath:      true,
 		HandleMethodNotAllowed: true,
@@ -733,6 +733,12 @@ func (engine *Engine) OPTIONS(relativePath string, handlers ...HandlerFunc) {
 	engine.Handle(http.MethodOptions, relativePath, handlers...)
 }
 
+// QUERY 注册 QUERY 方法的路由 (RFC 10008)
+// QUERY 方法是安全且幂等的，可以携带请求体，适用于复杂查询场景
+func (engine *Engine) QUERY(relativePath string, handlers ...HandlerFunc) {
+	engine.Handle(MethodQuery, relativePath, handlers...)
+}
+
 // ANY 注册所有常见 HTTP 方法的路由
 func (engine *Engine) ANY(relativePath string, handlers ...HandlerFunc) {
 	engine.Handle(http.MethodGet, relativePath, handlers...)
@@ -803,6 +809,9 @@ func (group *RouterGroup) HEAD(relativePath string, handlers ...HandlerFunc) {
 }
 func (group *RouterGroup) OPTIONS(relativePath string, handlers ...HandlerFunc) {
 	group.Handle(http.MethodOptions, relativePath, handlers...)
+}
+func (group *RouterGroup) QUERY(relativePath string, handlers ...HandlerFunc) {
+	group.Handle(MethodQuery, relativePath, handlers...)
 }
 func (group *RouterGroup) ANY(relativePath string, handlers ...HandlerFunc) {
 	group.Handle(http.MethodGet, relativePath, handlers...)

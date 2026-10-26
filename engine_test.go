@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -302,5 +303,91 @@ func TestDefaultErrorFastPathCapturesWriteErrors(t *testing.T) {
 	}
 	if !c.IsAborted() {
 		t.Fatal("expected fast path to abort context")
+	}
+}
+
+func TestQueryRouteMatchesAndExecutes(t *testing.T) {
+	engine := New()
+	engine.QUERY("/search", func(c *Context) {
+		c.String(http.StatusOK, "query-ok")
+	})
+
+	rr := PerformRequest(engine, MethodQuery, "/search", nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+	if rr.Body.String() != "query-ok" {
+		t.Fatalf("expected body %q, got %q", "query-ok", rr.Body.String())
+	}
+}
+
+func TestQueryRouteReadsRequestBody(t *testing.T) {
+	engine := New()
+	engine.QUERY("/search", func(c *Context) {
+		body, err := c.GetReqBodyFull()
+		if err != nil {
+			c.String(http.StatusBadRequest, "read-error")
+			return
+		}
+		c.String(http.StatusOK, "%s", string(body))
+	})
+
+	body := strings.NewReader(`{"q":"foo","limit":10}`)
+	rr := PerformRequest(engine, MethodQuery, "/search", body, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+	if rr.Body.String() != `{"q":"foo","limit":10}` {
+		t.Fatalf("expected body %q, got %q", `{"q":"foo","limit":10}`, rr.Body.String())
+	}
+}
+
+func TestQueryRouteInGroup(t *testing.T) {
+	engine := New()
+	api := engine.Group("/api")
+	api.QUERY("/data", func(c *Context) {
+		c.String(http.StatusOK, "api-data-query")
+	})
+
+	rr := PerformRequest(engine, MethodQuery, "/api/data", nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+	if rr.Body.String() != "api-data-query" {
+		t.Fatalf("expected body %q, got %q", "api-data-query", rr.Body.String())
+	}
+}
+
+func TestQueryMethodNotAllowedWhenOnlyGetRegistered(t *testing.T) {
+	engine := New()
+	engine.GET("/users", func(c *Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	rr := PerformRequest(engine, MethodQuery, "/users", nil, nil)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
+	}
+}
+
+func TestOptionsAllowHeaderIncludesQuery(t *testing.T) {
+	engine := New()
+	engine.QUERY("/users", func(c *Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	rr := PerformRequest(engine, http.MethodOptions, "/users", nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+	allow := rr.Header().Get("Allow")
+	if allow != "QUERY" {
+		t.Fatalf("expected Allow header %q, got %q", "QUERY", allow)
+	}
+}
+
+func TestReverseProxyMethodIsSafeIncludesQuery(t *testing.T) {
+	if !reverseProxyMethodIsSafe(MethodQuery) {
+		t.Fatalf("expected QUERY to be a safe method per RFC 10008")
 	}
 }

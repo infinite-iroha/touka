@@ -35,7 +35,8 @@ type Router interface {
 	PATCH(relativePath string, handlers ...HandlerFunc)
 	HEAD(relativePath string, handlers ...HandlerFunc)
 	OPTIONS(relativePath string, handlers ...HandlerFunc)
-	ANY(relativePath string, handlers ...HandlerFunc) // 注册所有HTTP方法
+	QUERY(relativePath string, handlers ...HandlerFunc) // 注册 QUERY 方法 (RFC 10008)
+	ANY(relativePath string, handlers ...HandlerFunc)   // 注册所有HTTP方法
 }
 
 // RouteInfo 包含一个已注册路由的详细信息。
@@ -58,6 +59,7 @@ var (
 	MethodConnect = "CONNECT"
 	MethodOptions = "OPTIONS"
 	MethodTrace   = "TRACE"
+	MethodQuery   = "QUERY" // RFC 10008 - The HTTP QUERY Method
 )
 
 var MethodsSet = map[string]struct{}{
@@ -70,4 +72,5 @@ var MethodsSet = map[string]struct{}{
 	MethodConnect: {},
 	MethodOptions: {},
 	MethodTrace:   {},
+	MethodQuery:   {},
 }
