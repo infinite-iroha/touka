@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Event 代表一个服务器发送事件(SSE).
@@ -114,6 +115,8 @@ func (c *Context) EventStream(streamer func(w io.Writer) bool) {
 // 与 EventStream 回调模式类似, 此方法是阻塞的: handler 会在此方法中停留,
 // 直到事件 channel 被关闭 (close eventChan) 或客户端断开连接.
 // 这保证了 Context 不会在 SSE 流期间被 pool 回收.
+// 客户端断开时, 本方法会先打断阻塞中的写入, 再等待写入 goroutine 完全退出后返回,
+// 因此 handler 返回后不会再有 goroutine 操作该响应.
 //
 // eventChan 必须在调用此方法之前创建, 以便调用者可以在独立的 goroutine 中发送事件.
 // 调用者必须在完成后 close(eventChan) 来结束流.
@@ -187,6 +190,21 @@ func (c *Context) EventStreamChan(eventChan <-chan Event) {
 	// 2. 客户端断开连接 (reqCtx 取消)
 	select {
 	case <-goroutineExited:
+		// 写入 goroutine 已自行退出, 此时响应收尾完全由 handler 独占.
 	case <-reqCtx.Done():
+		// 客户端断开(或服务端关闭): 先打断可能阻塞中的写入, 再等待写入 goroutine 退出.
+		//
+		// 必须等待: 否则写入 goroutine 会在 handler 返回后继续写同一个 ResponseWriter,
+		// 与 net/http 的收尾流程竞争(response 的 bufio.Writer 会被 flush 并放回全局池),
+		// 也可能在 Context 归还对象池后写入下一个请求的响应.
+		abortSSEWrite(w)
+		<-goroutineExited
 	}
+}
+
+// abortSSEWrite 通过设置一个已经过去的写超时来打断可能阻塞中的响应写入.
+// 写超时直接作用于底层连接, 不会与写入操作产生数据竞争;
+// 若底层不支持写超时(例如测试用的 ResponseRecorder), 则忽略错误.
+func abortSSEWrite(w ResponseWriter) {
+	_ = http.NewResponseController(UnwrapResponseWriter(w)).SetWriteDeadline(time.Now())
 }
