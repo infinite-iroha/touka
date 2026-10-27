@@ -54,6 +54,14 @@ func UnwrapResponseWriter(w ResponseWriter) http.ResponseWriter {
 	return w
 }
 
+// Unwrap 返回底层标准库的 http.ResponseWriter.
+// 供 http.ResponseController 等标准库设施穿透包装层使用,
+// 例如设置写超时(SetWriteDeadline)以中断阻塞中的写入.
+func (rw *responseWriterImpl) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
+// reset 重置 responseWriterImpl 以供复用
 func (rw *responseWriterImpl) reset(w http.ResponseWriter) {
 	rw.ResponseWriter = w
 	rw.status = 0
