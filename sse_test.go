@@ -256,13 +256,16 @@ func TestEventStreamChanWaitsForWriterGoroutine(t *testing.T) {
 func TestEventStreamChanDisconnectKeepsOtherResponsesIntact(t *testing.T) {
 	engine := New()
 	engine.GET("/sse", func(c *Context) {
+		// 必须在启动 goroutine 前取出请求上下文, 否则 goroutine 会在 handler
+		// 返回后访问已被对象池复用的 Context.
+		ctx := c.Request.Context()
 		eventChan := make(chan Event)
 		go func() {
 			defer close(eventChan)
 			payload := strings.Repeat("sse-payload-", 512)
 			for {
 				select {
-				case <-c.Request.Context().Done():
+				case <-ctx.Done():
 					return
 				case eventChan <- Event{Data: payload}:
 				}
@@ -309,6 +312,287 @@ func TestEventStreamChanDisconnectKeepsOtherResponsesIntact(t *testing.T) {
 		}
 		if string(body) != "pong" {
 			t.Fatalf("unexpected /ping body: %q", body)
+		}
+	}
+}
+
+// sseParsedEvent 是按 WHATWG HTML "Interpreting an event stream" 解析出的事件.
+type sseParsedEvent struct {
+	data        string
+	eventType   string
+	lastEventID string
+}
+
+// sseParser 按 WHATWG HTML 的规则解析事件流, 用于验证渲染结果是否符合规范.
+type sseParser struct {
+	data        strings.Builder
+	eventType   string
+	lastEventID string
+	retry       string
+	events      []sseParsedEvent
+}
+
+func parseSSEStream(stream string) *sseParser {
+	p := &sseParser{}
+	for _, line := range splitSSELines(stream) {
+		switch {
+		case line == "":
+			p.dispatch()
+		case strings.HasPrefix(line, ":"):
+			// 注释行, 忽略.
+		case strings.Contains(line, ":"):
+			name, value, _ := strings.Cut(line, ":")
+			p.processField(name, strings.TrimPrefix(value, " "))
+		default:
+			p.processField(line, "")
+		}
+	}
+	return p
+}
+
+func (p *sseParser) processField(name, value string) {
+	switch name {
+	case "event":
+		p.eventType = value
+	case "data":
+		p.data.WriteString(value)
+		p.data.WriteByte('\n')
+	case "id":
+		if !strings.ContainsRune(value, 0) {
+			p.lastEventID = value
+		}
+	case "retry":
+		if value != "" && allASCIIDigits(value) {
+			p.retry = value
+		}
+	}
+}
+
+func (p *sseParser) dispatch() {
+	if p.data.Len() == 0 {
+		p.data.Reset()
+		p.eventType = ""
+		return
+	}
+	data := strings.TrimSuffix(p.data.String(), "\n")
+	eventType := p.eventType
+	if eventType == "" {
+		// 用户代理在事件类型为空时使用默认类型 "message".
+		eventType = "message"
+	}
+	p.events = append(p.events, sseParsedEvent{
+		data:        data,
+		eventType:   eventType,
+		lastEventID: p.lastEventID,
+	})
+	p.data.Reset()
+	p.eventType = ""
+}
+
+// allASCIIDigits 判断字符串是否非空且只由 ASCII 数字组成.
+// 独立于被测代码实现, 避免测试与实现互相印证.
+func allASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// splitSSELines 按 SSE 的行结束规则(CRLF/CR/LF)切分文本.
+func splitSSELines(s string) []string {
+	var lines []string
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\r':
+			lines = append(lines, cur.String())
+			cur.Reset()
+			if i+1 < len(s) && s[i+1] == '\n' {
+				i++
+			}
+		case '\n':
+			lines = append(lines, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+	return lines
+}
+
+// renderEvent 渲染事件并返回原始字节.
+func renderEvent(t *testing.T, e *Event) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := e.Render(&sb); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	return sb.String()
+}
+
+// TestEventRenderConformsToSSEFormat verifies that the rendered event follows
+// the event stream format of the WHATWG HTML standard and is interpreted as
+// expected by a spec conformant client.
+func TestEventRenderConformsToSSEFormat(t *testing.T) {
+	tests := []struct {
+		name        string
+		event       Event
+		wantData    string
+		wantType    string
+		wantLastID  string
+		wantNoEvent bool
+	}{
+		{
+			name:       "simple",
+			event:      Event{Data: "hello"},
+			wantData:   "hello",
+			wantType:   "message",
+			wantLastID: "",
+		},
+		{
+			name:     "multi line data",
+			event:    Event{Data: "hello\nworld"},
+			wantData: "hello\nworld",
+			wantType: "message",
+		},
+		{
+			name:       "named event with id",
+			event:      Event{Event: "tick", Id: "42", Data: "payload"},
+			wantData:   "payload",
+			wantType:   "tick",
+			wantLastID: "42",
+		},
+		{
+			name:     "leading space is preserved",
+			event:    Event{Data: " hello"},
+			wantData: " hello",
+			wantType: "message",
+		},
+		{
+			name:     "crlf is normalized to lf",
+			event:    Event{Data: "hello\r\nworld"},
+			wantData: "hello\nworld",
+			wantType: "message",
+		},
+		{
+			name:     "lone cr does not break the frame",
+			event:    Event{Data: "hello\rworld"},
+			wantData: "hello\nworld",
+			wantType: "message",
+		},
+		{
+			name:        "empty data is not dispatched",
+			event:       Event{Id: "7"},
+			wantNoEvent: true,
+			wantLastID:  "7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := renderEvent(t, &tt.event)
+			if strings.ContainsRune(raw, '\r') {
+				t.Fatalf("rendered event contains a bare CR: %q", raw)
+			}
+			if !strings.HasSuffix(raw, "\n\n") {
+				t.Fatalf("event must end with a blank line, got %q", raw)
+			}
+
+			p := parseSSEStream(raw)
+			if tt.wantNoEvent {
+				if len(p.events) != 0 {
+					t.Fatalf("expected no dispatched event, got %d", len(p.events))
+				}
+			} else {
+				if len(p.events) != 1 {
+					t.Fatalf("expected exactly one event, got %d (%q)", len(p.events), raw)
+				}
+				got := p.events[0]
+				if got.data != tt.wantData {
+					t.Errorf("data = %q, want %q", got.data, tt.wantData)
+				}
+				wantType := tt.wantType
+				if wantType == "" {
+					wantType = "message"
+				}
+				if got.eventType != wantType {
+					t.Errorf("eventType = %q, want %q", got.eventType, wantType)
+				}
+				if got.lastEventID != tt.wantLastID {
+					t.Errorf("lastEventID = %q, want %q", got.lastEventID, tt.wantLastID)
+				}
+			}
+			if p.lastEventID != tt.wantLastID {
+				t.Errorf("last event ID buffer = %q, want %q", p.lastEventID, tt.wantLastID)
+			}
+		})
+	}
+}
+
+// TestEventRenderPreventsFieldInjection verifies that CR/LF inside field values
+// cannot break out of the event frame and inject additional fields.
+func TestEventRenderPreventsFieldInjection(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    Event
+		wantData string
+	}{
+		{name: "data with cr", event: Event{Data: "safe\rdata: injected"}, wantData: "safe\ndata: injected"},
+		{name: "data with crlf", event: Event{Data: "safe\r\ndata: injected"}, wantData: "safe\ndata: injected"},
+		{name: "data with lf", event: Event{Data: "safe\ndata: injected"}, wantData: "safe\ndata: injected"},
+		{name: "id with lf", event: Event{Id: "1\ndata: injected", Data: "payload"}, wantData: "payload"},
+		{name: "event with lf", event: Event{Event: "tick\ndata: injected", Data: "payload"}, wantData: "payload"},
+		{name: "retry with lf", event: Event{Retry: "1000\ndata: injected", Data: "payload"}, wantData: "payload"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := renderEvent(t, &tt.event)
+			if strings.ContainsRune(raw, '\r') {
+				t.Fatalf("rendered event contains a bare CR: %q", raw)
+			}
+			// 除 data 字段外不允许出现额外的字段.
+			for _, line := range splitSSELines(raw) {
+				if line == "" || strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				name, _, _ := strings.Cut(line, ":")
+				switch name {
+				case "id", "event", "retry":
+				default:
+					t.Fatalf("unexpected field %q in %q", name, raw)
+				}
+			}
+			// 注入的内容只能作为普通数据出现, 不会产生额外的事件或字段.
+			p := parseSSEStream(raw)
+			if len(p.events) != 1 {
+				t.Fatalf("field injection produced %d events: %q", len(p.events), raw)
+			}
+			if p.events[0].data != tt.wantData {
+				t.Fatalf("data = %q, want %q (raw %q)", p.events[0].data, tt.wantData, raw)
+			}
+		})
+	}
+}
+
+// TestEventRenderRetry verifies the retry field value space defined by the
+// specification: only ASCII digits are meaningful, other values are ignored by
+// the client and therefore must not be sent.
+func TestEventRenderRetry(t *testing.T) {
+	raw := renderEvent(t, &Event{Retry: "5000", Data: "x"})
+	if !strings.Contains(raw, "retry: 5000\n") {
+		t.Fatalf("missing retry field: %q", raw)
+	}
+
+	for _, invalid := range []string{"", "5s", "abc", "5 000", "0x10"} {
+		raw := renderEvent(t, &Event{Retry: invalid, Data: "x"})
+		if strings.Contains(raw, "retry:") {
+			t.Fatalf("invalid retry %q must not be sent: %q", invalid, raw)
 		}
 	}
 }

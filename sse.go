@@ -15,51 +15,118 @@ import (
 // Event 代表一个服务器发送事件(SSE).
 type Event struct {
 	// Event 是事件的名称.
+	// CR/LF 会被移除, 因为 SSE 的字段值不允许包含行终止符.
 	Event string
 	// Data 是事件的内容, 可以是多行文本.
+	// 行分隔符可以是 LF, CRLF 或 CR, 渲染时会被规范化为逐行的 data 字段.
+	// 为空时不会发送 data 字段, 此时客户端不会派发该事件(Id 仍会更新 Last-Event-ID).
 	Data string
 	// Id 是事件的唯一标识符.
+	// CR/LF/NUL 会被移除, 因为 SSE 的字段值不允许包含这些字符.
 	Id string
 	// Retry 是指定客户端在连接丢失后应等待多少毫秒后尝试重新连接.
+	// 必须是十进制 ASCII 数字, 否则该字段不会被发送(客户端会忽略非法的值).
 	Retry string
 }
 
 // Render 将事件格式化并写入给定的 writer.
-// 通过逐行处理数据, 此方法可防止因数据中包含换行符而导致的CRLF注入问题.
+// 输出遵循 WHATWG HTML "Server-sent events" 定义的事件流格式:
+//   - 字段格式为 "name: value", 冒号后的一个前导空格会被客户端剥离;
+//   - 数据按行拆分为多个 data 字段, 行分隔符支持 LF/CRLF/CR;
+//   - 事件以空行结束, 客户端收到空行后才会派发该事件;
+//   - 字段值中不会出现 CR/LF, 避免破坏事件帧结构或让客户端解析出额外的字段.
+//
 // 为了性能, 它使用 bytes.Buffer 并通过 WriteTo 直接写入, 以避免不必要的内存分配.
 func (e *Event) Render(w io.Writer) error {
 	var buf bytes.Buffer
 
-	if len(e.Id) > 0 {
+	if id := sanitizeSSEId(e.Id); len(id) > 0 {
 		buf.WriteString("id: ")
-		buf.WriteString(e.Id)
+		buf.WriteString(id)
 		buf.WriteString("\n")
 	}
-	if len(e.Event) > 0 {
+	if name := sanitizeSSEValue(e.Event); len(name) > 0 {
 		buf.WriteString("event: ")
-		buf.WriteString(e.Event)
+		buf.WriteString(name)
 		buf.WriteString("\n")
 	}
 	if len(e.Data) > 0 {
-		lines := strings.SplitSeq(e.Data, "\n")
+		lines := strings.SplitSeq(normalizeSSELineEndings(e.Data), "\n")
 		for line := range lines {
 			buf.WriteString("data: ")
 			buf.WriteString(line)
 			buf.WriteString("\n")
 		}
 	}
-	if len(e.Retry) > 0 {
+	// retry 字段只接受十进制 ASCII 数字, 其它值会被客户端忽略, 因此不再输出.
+	if isASCIIDigits(e.Retry) {
 		buf.WriteString("retry: ")
 		buf.WriteString(e.Retry)
 		buf.WriteString("\n")
 	}
 
-	// 每个事件都以一个额外的换行符结尾.
+	// 每个事件都以一个额外的换行符结尾, 客户端收到空行后才会派发该事件.
 	buf.WriteString("\n")
 
-	// 直接将 buffer 的内容写入 writer, 避免生成中间字符串.
 	_, err := buf.WriteTo(w)
 	return err
+}
+
+// sseLineEndingNormalizer 将 CRLF 与 CR 统一规范化为 LF.
+var sseLineEndingNormalizer = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
+// normalizeSSELineEndings 把数据中的 CRLF/CR 统一转换为 LF.
+// SSE 的行终止符可以是 LF/CRLF/CR, 但字段值内部不允许出现 CR,
+// 否则客户端会把裸 CR 当作行结束符, 截断数据甚至解析出额外的字段.
+func normalizeSSELineEndings(s string) string {
+	if !strings.ContainsRune(s, '\r') {
+		return s
+	}
+	return sseLineEndingNormalizer.Replace(s)
+}
+
+// sanitizeSSEValue 移除字段值中的 CR/LF.
+// SSE 的 ABNF 规定字段值只允许出现除 CR/LF 以外的字符.
+func sanitizeSSEValue(s string) string {
+	return stripSSEBytes(s, "\r\n")
+}
+
+// sanitizeSSEId 在 sanitizeSSEValue 的基础上额外移除 NUL.
+// 客户端会忽略包含 NUL 的 id 字段, 移除后可以保留 id 的实际含义.
+func sanitizeSSEId(s string) string {
+	return stripSSEBytes(s, "\r\n\x00")
+}
+
+// stripSSEBytes 移除字符串中的指定 ASCII 字节, 无需移除时原样返回.
+// UTF-8 的多字节序列不会包含这些 ASCII 字节, 因此按字节处理是安全的.
+func stripSSEBytes(s, drop string) string {
+	idx := strings.IndexAny(s, drop)
+	if idx < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:idx])
+	for i := idx; i < len(s); i++ {
+		if !strings.ContainsRune(drop, rune(s[i])) {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// isASCIIDigits 判断字符串是否非空且只由 ASCII 数字组成.
+// SSE 规范要求 retry 字段的值必须是十进制 ASCII 数字, 否则客户端会忽略该字段.
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // EventStream 启动一个 SSE 事件流.
