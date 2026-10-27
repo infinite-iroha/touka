@@ -2,10 +2,12 @@ package touka
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,12 +175,17 @@ func (w *blockingSSEWriter) WriteHeader(int) {}
 func (w *blockingSSEWriter) Write(p []byte) (int, error) {
 	w.once.Do(func() { close(w.entered) })
 	<-w.release
+	w.recordWrite()
+	return len(p), nil
+}
+
+// recordWrite 记录 handler 返回之后仍然发生的写入.
+func (w *blockingSSEWriter) recordWrite() {
 	if w.handlerDone.Load() {
 		w.mu.Lock()
 		w.wroteAfterHandler = true
 		w.mu.Unlock()
 	}
-	return len(p), nil
 }
 
 func (w *blockingSSEWriter) Flush() {}
@@ -191,11 +198,43 @@ func (w *blockingSSEWriter) wroteAfterHandlerDone() bool {
 	return w.wroteAfterHandler
 }
 
-// TestEventStreamChanWaitsForWriterGoroutine verifies that EventStreamChan does
-// not return while its internal writer goroutine is still writing to the
-// response. Returning early races with net/http response finalization, which
-// flushes and recycles the response's bufio.Writer.
-func TestEventStreamChanWaitsForWriterGoroutine(t *testing.T) {
+// deadlineSSEWriter 支持写超时, 可以在写入阻塞时被写超时中断.
+type deadlineSSEWriter struct {
+	*blockingSSEWriter
+	deadlineSet  chan struct{}
+	deadlineOnce sync.Once
+}
+
+func newDeadlineSSEWriter() *deadlineSSEWriter {
+	return &deadlineSSEWriter{
+		blockingSSEWriter: newBlockingSSEWriter(),
+		deadlineSet:       make(chan struct{}),
+	}
+}
+
+// SetWriteDeadline 记录写超时, 并解除阻塞中的写入.
+func (w *deadlineSSEWriter) SetWriteDeadline(time.Time) error {
+	w.deadlineOnce.Do(func() { close(w.deadlineSet) })
+	return nil
+}
+
+func (w *deadlineSSEWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	select {
+	case <-w.release:
+		w.recordWrite()
+		return len(p), nil
+	case <-w.deadlineSet:
+		// 写超时中断了写入.
+		return 0, os.ErrDeadlineExceeded
+	}
+}
+
+// TestEventStreamChanWaitsForInFlightWrite verifies that EventStreamChan does
+// not return while a write to the response is still in flight. Returning early
+// races with net/http response finalization, which flushes and recycles the
+// response's bufio.Writer.
+func TestEventStreamChanWaitsForInFlightWrite(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -218,34 +257,82 @@ func TestEventStreamChanWaitsForWriterGoroutine(t *testing.T) {
 		close(handlerDone)
 	}()
 
-	// 等待写入 goroutine 进入 Write 并阻塞.
+	// 等待写入进入并阻塞.
 	select {
 	case <-writer.entered:
 	case <-time.After(time.Second):
-		t.Fatal("writer goroutine never entered Write")
+		t.Fatal("handler never entered Write")
 	}
 
 	// 模拟客户端断开.
 	cancel()
 
-	// handler 必须等待写入 goroutine 退出.
+	// handler 必须等待在途的写入结束.
 	select {
 	case <-handlerDone:
-		t.Fatal("EventStreamChan returned while the writer goroutine was still writing")
+		t.Fatal("EventStreamChan returned while the response was still being written")
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// 解除写入阻塞, 写入 goroutine 应当退出并让 handler 返回.
+	// 解除写入阻塞, handler 应当返回.
 	close(writer.release)
 
 	select {
 	case <-handlerDone:
 	case <-time.After(time.Second):
-		t.Fatal("EventStreamChan did not return after the writer goroutine exited")
+		t.Fatal("EventStreamChan did not return after the write finished")
 	}
 
 	if writer.wroteAfterHandlerDone() {
 		t.Fatal("response was written after EventStreamChan returned")
+	}
+}
+
+// TestEventStreamChanInterruptsBlockedWriteOnDisconnect verifies that a blocked
+// write is interrupted by the write deadline when the client disconnects.
+func TestEventStreamChanInterruptsBlockedWriteOnDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/sse", nil).WithContext(ctx)
+	writer := newDeadlineSSEWriter()
+	c, _ := CreateTestContextWithRequest(writer, req)
+
+	eventChan := make(chan Event)
+	go func() {
+		select {
+		case eventChan <- Event{Data: "hello"}:
+		case <-ctx.Done():
+		}
+	}()
+
+	handlerDone := make(chan struct{})
+	go func() {
+		c.EventStreamChan(eventChan)
+		close(handlerDone)
+	}()
+
+	// 等待写入进入并阻塞.
+	select {
+	case <-writer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler never entered Write")
+	}
+
+	// 模拟客户端断开: 看门狗应设置写超时并打断阻塞中的写入.
+	cancel()
+
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		close(writer.release)
+		t.Fatal("EventStreamChan did not return after the client disconnected")
+	}
+
+	select {
+	case <-writer.deadlineSet:
+	default:
+		t.Fatal("write deadline was not set on client disconnect")
 	}
 }
 
@@ -594,5 +681,90 @@ func TestEventRenderRetry(t *testing.T) {
 		if strings.Contains(raw, "retry:") {
 			t.Fatalf("invalid retry %q must not be sent: %q", invalid, raw)
 		}
+	}
+}
+
+// recordingLogger 记录日志消息, 用于验证错误没有被静默忽略.
+type recordingLogger struct {
+	mu    sync.Mutex
+	warns []string
+	errs  []string
+}
+
+func (l *recordingLogger) Debugf(string, ...any) {}
+func (l *recordingLogger) Infof(string, ...any)  {}
+
+func (l *recordingLogger) Warnf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, fmt.Sprintf(format, args...))
+}
+
+func (l *recordingLogger) Errorf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errs = append(l.errs, fmt.Sprintf(format, args...))
+}
+
+func (l *recordingLogger) Fatalf(string, ...any) {}
+func (l *recordingLogger) Panicf(string, ...any) {}
+
+func (l *recordingLogger) messages() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append(append([]string{}, l.warns...), l.errs...)
+}
+
+// TestEventStreamChanReportsWriteDeadlineFailure verifies that a failure to set
+// the write deadline is reported instead of being silently ignored: without it
+// a blocked write cannot be interrupted on client disconnect.
+func TestEventStreamChanReportsWriteDeadlineFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/sse", nil).WithContext(ctx)
+	// blockingSSEWriter 不支持写超时.
+	writer := newBlockingSSEWriter()
+	c, engine := CreateTestContextWithRequest(writer, req)
+	logger := &recordingLogger{}
+	engine.SetLogger(logger)
+
+	eventChan := make(chan Event)
+	go func() {
+		select {
+		case eventChan <- Event{Data: "hello"}:
+		case <-ctx.Done():
+		}
+	}()
+
+	handlerDone := make(chan struct{})
+	go func() {
+		c.EventStreamChan(eventChan)
+		close(handlerDone)
+	}()
+
+	select {
+	case <-writer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler never entered Write")
+	}
+
+	// 模拟客户端断开.
+	cancel()
+
+	// 解除写入阻塞, 让 handler 返回.
+	close(writer.release)
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("EventStreamChan did not return after the write finished")
+	}
+
+	messages := logger.messages()
+	if len(messages) == 0 {
+		t.Fatal("the write deadline failure was silently ignored")
+	}
+	if !strings.Contains(strings.Join(messages, "\n"), "写超时") {
+		t.Fatalf("unexpected log messages: %v", messages)
 	}
 }

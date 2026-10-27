@@ -6,6 +6,7 @@ package touka
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -182,8 +183,8 @@ func (c *Context) EventStream(streamer func(w io.Writer) bool) {
 // 与 EventStream 回调模式类似, 此方法是阻塞的: handler 会在此方法中停留,
 // 直到事件 channel 被关闭 (close eventChan) 或客户端断开连接.
 // 这保证了 Context 不会在 SSE 流期间被 pool 回收.
-// 客户端断开时, 本方法会先打断阻塞中的写入, 再等待写入 goroutine 完全退出后返回,
-// 因此 handler 返回后不会再有 goroutine 操作该响应.
+// 事件由 handler goroutine 直接写入, 因此本方法返回后不会再有 goroutine 操作该响应.
+// 客户端断开(或服务端关闭)时, 会通过写超时打断可能阻塞中的写入.
 //
 // eventChan 必须在调用此方法之前创建, 以便调用者可以在独立的 goroutine 中发送事件.
 // 调用者必须在完成后 close(eventChan) 来结束流.
@@ -228,50 +229,58 @@ func (c *Context) EventStreamChan(eventChan <-chan Event) {
 	fl, _ := w.(http.Flusher)
 	reqCtx := c.Request.Context()
 
-	goroutineExited := make(chan struct{})
-
-	// 写入 goroutine: 从 eventChan 消费事件并写入响应.
+	// 看门狗: 客户端断开(或服务端关闭)时打断可能阻塞中的写入.
+	// 它只设置写超时, 不写入响应内容, 因此与写入操作并发安全.
+	watchdogStop := make(chan struct{})
+	watchdogExited := make(chan struct{})
 	go func() {
-		defer close(goroutineExited)
-
-		for {
-			select {
-			case event, ok := <-eventChan:
-				if !ok {
-					return
-				}
-				if err := event.Render(w); err != nil {
-					return
-				}
-				if fl != nil {
-					fl.Flush()
-				}
-			case <-reqCtx.Done():
-				return
+		defer close(watchdogExited)
+		select {
+		case <-reqCtx.Done():
+		case <-watchdogStop:
+			return
+		}
+		if err := abortSSEWrite(w); err != nil {
+			// 底层 writer 不支持写超时时, 阻塞中的写入无法被中断,
+			// 只能等待写入自行结束(例如客户端断开导致写入报错).
+			if errors.Is(err, http.ErrNotSupported) {
+				c.Warnf("SSE: 底层 ResponseWriter 不支持写超时, 阻塞中的写入无法被中断: %v", err)
+			} else {
+				c.Errorf("SSE: 设置写超时失败: %v", err)
 			}
 		}
 	}()
 
-	// 阻塞直到:
-	// 1. 写入 goroutine 退出 (eventChan 关闭或写入失败)
-	// 2. 客户端断开连接 (reqCtx 取消)
-	select {
-	case <-goroutineExited:
-		// 写入 goroutine 已自行退出, 此时响应收尾完全由 handler 独占.
-	case <-reqCtx.Done():
-		// 客户端断开(或服务端关闭): 先打断可能阻塞中的写入, 再等待写入 goroutine 退出.
-		//
-		// 必须等待: 否则写入 goroutine 会在 handler 返回后继续写同一个 ResponseWriter,
-		// 与 net/http 的收尾流程竞争(response 的 bufio.Writer 会被 flush 并放回全局池),
-		// 也可能在 Context 归还对象池后写入下一个请求的响应.
-		abortSSEWrite(w)
-		<-goroutineExited
+	// handler 返回前必须等待看门狗退出, 否则它可能在响应被回收后继续访问 ResponseWriter.
+	// 看门狗只做一次设置写超时的调用, 因此这里的等待不会阻塞.
+	defer func() {
+		close(watchdogStop)
+		<-watchdogExited
+	}()
+
+	// 事件在 handler goroutine 内写入: 写入结束后本方法才返回,
+	// 因此不会与 net/http 的响应收尾流程(或 Context 对象池复用)争抢 ResponseWriter.
+	for {
+		select {
+		case event, ok := <-eventChan:
+			if !ok {
+				return
+			}
+			if err := event.Render(w); err != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		case <-reqCtx.Done():
+			return
+		}
 	}
 }
 
 // abortSSEWrite 通过设置一个已经过去的写超时来打断可能阻塞中的响应写入.
-// 写超时直接作用于底层连接, 不会与写入操作产生数据竞争;
-// 若底层不支持写超时(例如测试用的 ResponseRecorder), 则忽略错误.
-func abortSSEWrite(w ResponseWriter) {
-	_ = http.NewResponseController(UnwrapResponseWriter(w)).SetWriteDeadline(time.Now())
+// 写超时直接作用于底层连接, 不会与写入操作产生数据竞争.
+// 返回的错误表示底层 writer 不支持写超时, 此时阻塞中的写入无法被中断.
+func abortSSEWrite(w ResponseWriter) error {
+	return http.NewResponseController(w).SetWriteDeadline(time.Now())
 }

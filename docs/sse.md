@@ -70,7 +70,7 @@ r.GET("/events-chan", func(c *touka.Context) {
 
 ## 最佳实践
 
-1. **资源回收**: `EventStreamChan` 是阻塞的，handler 在事件流结束前不会返回。将 `c.Request.Context().Done()` 和 `eventChan <- ...` 作为同一个 `select` 的两个分支，确保发送操作本身能够响应客户端断开。客户端断开时，`EventStreamChan` 会先用一个已经过去的写超时打断阻塞中的写入，再等待内部写入 goroutine 完全退出后返回，因此 handler 返回后不会再有 goroutine 操作该响应（否则会与 `net/http` 的响应收尾流程争抢 response 的 `bufio.Writer`）。
+1. **资源回收**: `EventStreamChan` 是阻塞的，handler 在事件流结束前不会返回。将 `c.Request.Context().Done()` 和 `eventChan <- ...` 作为同一个 `select` 的两个分支，确保发送操作本身能够响应客户端断开。事件由 handler goroutine 直接写入，因此 handler 返回后不会再有 goroutine 操作该响应（否则会与 `net/http` 的响应收尾流程争抢 response 的 `bufio.Writer`）。客户端断开（或服务端关闭）时，会用一个已经过去的写超时打断阻塞中的写入；若底层 `ResponseWriter` 不支持写超时（例如自定义包装器未实现 `Unwrap() http.ResponseWriter`），该失败会被记录为警告日志，阻塞中的写入只能等待其自行结束。
 2. **关闭 Channel**: 生产者完成发送后必须 `close(eventChan)`，否则 handler 会永远阻塞。
 3. **数据格式**: SSE 协议要求数据为 UTF-8。Touka 的 `Render` 方法会自动处理多行数据并加上必要的 `data:` 前缀。
 4. **超时管理**: SSE 连接通常是长连接，请确保您的反向代理（如 Nginx）配置了足够大的写超时时间。
